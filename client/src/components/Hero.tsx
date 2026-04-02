@@ -43,6 +43,42 @@ export default function Hero() {
           }}
         />
 
+        {/* Animated Gradient Orbs */}
+        <motion.div
+          animate={{
+            x: [0, 100, -50, 0],
+            y: [0, -50, 100, 0],
+          }}
+          transition={{
+            duration: 15,
+            repeat: Infinity,
+            ease: 'easeInOut',
+          }}
+          className="absolute top-1/4 left-1/4 w-96 h-96 rounded-full pointer-events-none"
+          style={{
+            background: 'radial-gradient(circle, rgba(139, 92, 246, 0.25) 0%, transparent 70%)',
+            filter: 'blur(60px)',
+          }}
+        />
+
+        <motion.div
+          animate={{
+            x: [0, -80, 60, 0],
+            y: [0, 80, -60, 0],
+          }}
+          transition={{
+            duration: 18,
+            repeat: Infinity,
+            ease: 'easeInOut',
+            delay: 2,
+          }}
+          className="absolute bottom-1/4 right-1/4 w-80 h-80 rounded-full pointer-events-none"
+          style={{
+            background: 'radial-gradient(circle, rgba(245, 158, 11, 0.2) 0%, transparent 70%)',
+            filter: 'blur(50px)',
+          }}
+        />
+
         {/* Radial Gradient Blobs */}
         <div
           className="absolute inset-0"
@@ -53,6 +89,147 @@ export default function Hero() {
             `,
           }}
         />
+
+        {/* Animated Floating Particles */}
+        <div className="absolute inset-0 overflow-hidden">
+          {[...Array(15)].map((_, i) => (
+            <motion.div
+              key={`particle-${i}`}
+              className="absolute rounded-full"
+              style={{
+                width: Math.random() * 6 + 2,
+                height: Math.random() * 6 + 2,
+                left: `${Math.random() * 100}%`,
+                top: `${Math.random() * 100}%`,
+                background: i % 2 === 0 ? 'rgba(139, 92, 246, 0.6)' : 'rgba(245, 158, 11, 0.5)',
+              }}
+              animate={{
+                y: [0, Math.random() * 200 - 100],
+                x: [0, Math.random() * 100 - 50],
+                opacity: [0.3, 1, 0.3],
+              }}
+              transition={{
+                duration: Math.random() * 8 + 6,
+                repeat: Infinity,
+                ease: 'easeInOut',
+                delay: Math.random() * 2,
+              }}
+            />
+          ))}
+        </div>
+
+        {/* Animated Vector Graphics - Enhanced */}
+        <motion.svg
+          className="absolute inset-0 w-full h-full pointer-events-none"
+          style={{ opacity: 0.3 }}
+          viewBox="0 0 1000 1000"
+          preserveAspectRatio="xMidYMid slice"
+        >
+          {/* Left Sword - Enhanced */}
+          <motion.g
+            animate={{
+              rotate: [0, 360],
+              y: [0, -30, 0],
+            }}
+            transition={{
+              rotate: { duration: 20, repeat: Infinity, ease: 'linear' },
+              y: { duration: 4, repeat: Infinity, ease: 'easeInOut' },
+            }}
+            style={{ transformOrigin: '150px 200px' }}
+          >
+            <path
+              d="M 150 50 L 140 200 L 150 250 L 160 200 Z"
+              fill="none"
+              stroke="rgba(139, 92, 246, 0.8)"
+              strokeWidth="4"
+              strokeLinecap="round"
+            />
+            <circle cx="150" cy="30" r="10" fill="rgba(245, 158, 11, 1)" />
+            <circle cx="150" cy="30" r="15" fill="none" stroke="rgba(139, 92, 246, 0.4)" strokeWidth="2" />
+          </motion.g>
+
+          {/* Right Sword - Enhanced */}
+          <motion.g
+            animate={{
+              rotate: [0, -360],
+              y: [0, 30, 0],
+            }}
+            transition={{
+              rotate: { duration: 25, repeat: Infinity, ease: 'linear' },
+              y: { duration: 5, repeat: Infinity, ease: 'easeInOut' },
+            }}
+            style={{ transformOrigin: '850px 200px' }}
+          >
+            <path
+              d="M 850 50 L 840 200 L 850 250 L 860 200 Z"
+              fill="none"
+              stroke="rgba(245, 158, 11, 0.8)"
+              strokeWidth="4"
+              strokeLinecap="round"
+            />
+            <circle cx="850" cy="30" r="10" fill="rgba(139, 92, 246, 1)" />
+            <circle cx="850" cy="30" r="15" fill="none" stroke="rgba(245, 158, 11, 0.4)" strokeWidth="2" />
+          </motion.g>
+
+          {/* Floating Crown - Enhanced */}
+          <motion.g
+            animate={{
+              y: [0, -40, 0],
+              x: [0, 15, 0],
+              rotate: [0, 5, -5, 0],
+            }}
+            transition={{
+              duration: 6,
+              repeat: Infinity,
+              ease: 'easeInOut',
+            }}
+          >
+            <path
+              d="M 500 100 L 520 150 L 500 160 L 480 150 Z"
+              fill="rgba(245, 158, 11, 0.7)"
+            />
+            <circle cx="500" cy="85" r="8" fill="rgba(139, 92, 246, 0.9)" />
+            <circle cx="500" cy="85" r="12" fill="none" stroke="rgba(245, 158, 11, 0.5)" strokeWidth="2" />
+          </motion.g>
+
+          {/* Animated Rings */}
+          <motion.circle
+            cx="500"
+            cy="500"
+            r="100"
+            fill="none"
+            stroke="rgba(139, 92, 246, 0.3)"
+            strokeWidth="2"
+            animate={{
+              r: [100, 200, 100],
+              opacity: [0.5, 0.1, 0.5],
+            }}
+            transition={{
+              duration: 5,
+              repeat: Infinity,
+              ease: 'easeInOut',
+            }}
+          />
+
+          <motion.circle
+            cx="500"
+            cy="500"
+            r="150"
+            fill="none"
+            stroke="rgba(245, 158, 11, 0.3)"
+            strokeWidth="2"
+            animate={{
+              r: [150, 250, 150],
+              opacity: [0.3, 0.1, 0.3],
+            }}
+            transition={{
+              duration: 7,
+              repeat: Infinity,
+              ease: 'easeInOut',
+              delay: 1,
+            }}
+          />
+        </motion.svg>
 
         {/* Dot Grid Texture */}
         <svg
