@@ -22,7 +22,6 @@ A professional Solana-based NFT card game platform built with React, TypeScript,
 - **Achievement System**: Unlock badges for milestones and achievements
 - **Local Match Engine**: Play matches without wallet connection using demo mode
 - **Match Settlement**: Automatic NFT transfer and ledger tracking
-- **localStorage Persistence**: Maintain wallet and profile data across sessions
 
 ## 🔧 Prerequisites
 
