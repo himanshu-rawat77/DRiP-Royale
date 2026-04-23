@@ -8,6 +8,7 @@ import AchievementBadges from '@/components/AchievementBadges';
 import { PlayerStats } from '@/lib/achievements';
 import { useProfileStorage } from '@/hooks/useLocalStorage';
 import { usePhantomWallet } from '@/contexts/PhantomWalletContext';
+import { fetchRoyaleWalletState, fetchTokenomicsConfig } from '@/lib/tokenomicsClient';
 
 const PROFILE_BG = 'https://d2xsxph8kpxj0f.cloudfront.net/310519663486830791/WuCyWqVdFPbfCADWcJauKD/card-pattern-bg-By5zBsUSv6CrFLKpdTgQ8r.webp';
 
@@ -53,6 +54,9 @@ export default function ProfilePage() {
   const [isEditing, setIsEditing] = useState(false);
   const [showLeaderboard, setShowLeaderboard] = useState(false);
   const [showLedger, setShowLedger] = useState(false);
+  const [royaleBalance, setRoyaleBalance] = useState<number>(0);
+  const [challengeTickets, setChallengeTickets] = useState<number>(0);
+  const [tokenSupply, setTokenSupply] = useState<number | null>(null);
 
   const [profile, setProfile] = useState<UserProfile>(storedProfile);
   const [editProfile, setEditProfile] = useState<UserProfile>(storedProfile);
@@ -64,6 +68,34 @@ export default function ProfilePage() {
     }
     loadAssets(publicKey, 52);
   }, [publicKey, loadAssets, reset]);
+
+  useEffect(() => {
+    if (!publicKey) {
+      setRoyaleBalance(0);
+      setChallengeTickets(0);
+      return;
+    }
+    void (async () => {
+      try {
+        const walletState = await fetchRoyaleWalletState(publicKey);
+        setRoyaleBalance(walletState.royaleBalance);
+        setChallengeTickets(walletState.challengeTickets);
+      } catch {
+        /* ignore */
+      }
+    })();
+  }, [publicKey]);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const cfg = await fetchTokenomicsConfig();
+        setTokenSupply(cfg.totalSupply);
+      } catch {
+        /* ignore */
+      }
+    })();
+  }, []);
 
   const handleSaveProfile = () => {
     setProfile(editProfile);
@@ -318,6 +350,16 @@ export default function ProfilePage() {
                         }}
                       >
                         Wallet: {publicKey.slice(0, 8)}...{publicKey.slice(-8)}
+                      </p>
+                      <p
+                        className="text-xs mt-1"
+                        style={{
+                          fontFamily: "'IBM Plex Mono', monospace",
+                          color: '#A78BFA',
+                        }}
+                      >
+                        ROYALE: {royaleBalance.toLocaleString()} · Tickets: {challengeTickets}
+                        {tokenSupply !== null ? ` · Supply: ${tokenSupply.toLocaleString()}` : ''}
                       </p>
                     </div>
 

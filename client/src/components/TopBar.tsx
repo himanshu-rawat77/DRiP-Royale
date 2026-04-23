@@ -1,13 +1,17 @@
 import { motion } from 'framer-motion';
 import { useLocation } from 'wouter';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import { usePhantomWallet } from '@/contexts/PhantomWalletContext';
+import { airdropRoyale, fetchRoyaleWalletState } from '@/lib/tokenomicsClient';
 
 export default function TopBar() {
   const [, navigate] = useLocation();
   const [activeNav, setActiveNav] = useState('');
   const { publicKey, connect, connecting, isPhantomAvailable } = usePhantomWallet();
+  const [royaleBalance, setRoyaleBalance] = useState<number>(0);
+  const [challengeTickets, setChallengeTickets] = useState<number>(0);
+  const [showTokenDropdown, setShowTokenDropdown] = useState(false);
 
   const formatPk = (pk: string) =>
     pk.length > 10 ? `${pk.slice(0, 4)}…${pk.slice(-4)}` : pk;
@@ -31,13 +35,47 @@ export default function TopBar() {
 
   const navItems = [
     { id: 'vault', label: 'THE VAULT', path: '/vault' },
-    { id: 'arena', label: 'THE ARENA', path: '/arena' },
+    // { id: 'arena', label: 'THE ARENA', path: '/arena' },
+    { id: 'campaigns', label: 'CAMPAIGNS', path: '/campaigns' },
     { id: 'profile', label: 'PROFILE', path: '/profile' },
   ];
 
   const handleNavClick = (item: typeof navItems[0]) => {
     setActiveNav(item.id);
     navigate(item.path);
+  };
+
+  useEffect(() => {
+    if (!publicKey) {
+      setRoyaleBalance(0);
+      return;
+    }
+    void (async () => {
+      try {
+        const state = await fetchRoyaleWalletState(publicKey);
+        setRoyaleBalance(state.royaleBalance);
+        setChallengeTickets(state.challengeTickets);
+      } catch {
+        setRoyaleBalance(0);
+        setChallengeTickets(0);
+      }
+    })();
+  }, [publicKey]);
+
+  const handleAirdrop = async () => {
+    if (!publicKey) {
+      toast.error('Connect wallet first');
+      return;
+    }
+    try {
+      const next = await airdropRoyale(publicKey);
+      setRoyaleBalance(next.royaleBalance);
+      setChallengeTickets(next.challengeTickets);
+      setShowTokenDropdown(false);
+      toast.success('+100 ROYALE airdropped');
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Airdrop failed');
+    }
   };
 
   return (
@@ -100,26 +138,57 @@ export default function TopBar() {
 
         {/* Right Section */}
         <div className="flex items-center gap-4">
-          {/* Live Duel Counter */}
-          <motion.div
-            whileHover={{ scale: 1.05 }}
-            className="hidden sm:flex items-center gap-2 px-4 py-2 rounded-full"
-            style={{
-              background: 'rgba(139, 92, 246, 0.1)',
-              border: '1px solid rgba(139, 92, 246, 0.2)',
-            }}
-          >
-            <span className="text-xs" style={{ color: '#F59E0B' }}>●</span>
-            <span
-              className="text-xs font-bold"
+          {/* ROYALE Token Counter */}
+          <div className="relative hidden sm:block">
+            <motion.button
+              whileHover={{ scale: 1.05 }}
+              onClick={() => setShowTokenDropdown((v) => !v)}
+              className="flex items-center gap-2 px-4 py-2 rounded-full"
               style={{
-                fontFamily: "'IBM Plex Mono', monospace",
-                color: '#A78BFA',
+                background: 'rgba(139, 92, 246, 0.1)',
+                border: '1px solid rgba(139, 92, 246, 0.2)',
               }}
             >
-              24/7 LIVE DUELS
-            </span>
-          </motion.div>
+              <span className="text-xs" style={{ color: '#F59E0B' }}>◆</span>
+              <span
+                className="text-xs font-bold"
+                style={{
+                  fontFamily: "'IBM Plex Mono', monospace",
+                  color: '#A78BFA',
+                }}
+              >
+                ROYALE: {royaleBalance}
+              </span>
+            </motion.button>
+            {showTokenDropdown && (
+              <div
+                className="absolute right-0 mt-2 w-56 rounded-lg p-3 z-50"
+                style={{
+                  background: 'rgba(7, 6, 15, 0.96)',
+                  border: '1px solid rgba(139, 92, 246, 0.25)',
+                  backdropFilter: 'blur(12px)',
+                }}
+              >
+                <p className="text-xs mb-1" style={{ color: '#A78BFA', fontFamily: "'IBM Plex Mono', monospace" }}>
+                  Balance: {royaleBalance} ROYALE
+                </p>
+                <p className="text-xs mb-3" style={{ color: 'rgba(255,255,255,0.55)', fontFamily: "'IBM Plex Mono', monospace" }}>
+                  Tickets: {challengeTickets}
+                </p>
+                <button
+                  onClick={() => void handleAirdrop()}
+                  className="w-full text-xs font-bold py-2 rounded-lg"
+                  style={{
+                    background: 'rgba(16, 185, 129, 0.18)',
+                    color: '#34D399',
+                    fontFamily: "'Syne', sans-serif",
+                  }}
+                >
+                  AIRDROP +100 ROYALE
+                </button>
+              </div>
+            )}
+          </div>
 
           <motion.button
             whileHover={{ scale: 1.05 }}
