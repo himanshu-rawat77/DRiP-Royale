@@ -52,7 +52,7 @@ export default function ArenaPage() {
   const { publicKey } = usePhantomWallet();
   const { selectedDeck } = useDeck();
   const { isDummyMode, selectedDummyCards } = useDummyDeck();
-  const [ledger, setLedger] = useLedgerStorage();
+  const [ledger, setLedger] = useLedgerStorage(publicKey);
   const ledgerRef = useRef(ledger);
   ledgerRef.current = ledger;
 

@@ -1,12 +1,13 @@
 import { motion } from 'framer-motion';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { useLocation } from 'wouter';
+import { toast } from 'sonner';
 import TopBar from '@/components/TopBar';
 import Footer from '@/components/Footer';
 import { useHeliusAssets } from '@/hooks/useHeliusAssets';
 import AchievementBadges from '@/components/AchievementBadges';
 import { PlayerStats } from '@/lib/achievements';
-import { useProfileStorage } from '@/hooks/useLocalStorage';
+import { exportWalletBackup, importWalletBackup, useLedgerStorage, useProfileStorage } from '@/hooks/useLocalStorage';
 import { usePhantomWallet } from '@/contexts/PhantomWalletContext';
 import { fetchRoyaleWalletState, fetchTokenomicsConfig } from '@/lib/tokenomicsClient';
 
@@ -30,14 +31,6 @@ const DUMMY_LEADERBOARD = [
   { rank: 5, username: 'InfernoDragon', wins: 142, winRate: 67.3 },
 ];
 
-const DUMMY_LEDGER = [
-  { id: 1, opponent: 'ShadowMaster', result: 'WIN', date: '2 hours ago', reward: '+50 SOL' },
-  { id: 2, opponent: 'GoldenPhoenix', result: 'LOSS', date: '5 hours ago', reward: '-25 SOL' },
-  { id: 3, opponent: 'VoidSentinel', result: 'WIN', date: '1 day ago', reward: '+75 SOL' },
-  { id: 4, opponent: 'CrystalGuard', result: 'WIN', date: '2 days ago', reward: '+60 SOL' },
-  { id: 5, opponent: 'InfernoDragon', result: 'LOSS', date: '3 days ago', reward: '-30 SOL' },
-];
-
 export default function ProfilePage() {
   const [, navigate] = useLocation();
   const { assets, loading, error, loadAssets, clearError, reset } = useHeliusAssets();
@@ -50,16 +43,31 @@ export default function ProfilePage() {
     isPhantomAvailable,
     clearError: clearWalletError,
   } = usePhantomWallet();
-  const [storedProfile, setStoredProfile] = useProfileStorage();
+  const [storedProfile, setStoredProfile] = useProfileStorage(publicKey);
+  const [ledger] = useLedgerStorage(publicKey);
   const [isEditing, setIsEditing] = useState(false);
   const [showLeaderboard, setShowLeaderboard] = useState(false);
   const [showLedger, setShowLedger] = useState(false);
   const [royaleBalance, setRoyaleBalance] = useState<number>(0);
   const [challengeTickets, setChallengeTickets] = useState<number>(0);
   const [tokenSupply, setTokenSupply] = useState<number | null>(null);
+  const importInputRef = useRef<HTMLInputElement | null>(null);
 
   const [profile, setProfile] = useState<UserProfile>(storedProfile);
   const [editProfile, setEditProfile] = useState<UserProfile>(storedProfile);
+
+  const ledgerStats = useMemo(() => {
+    const wins = ledger.filter((entry) => entry.result === 'WIN').length;
+    const losses = ledger.filter((entry) => entry.result === 'LOSS').length;
+    const total = wins + losses;
+    const winRate = total > 0 ? Number(((wins / total) * 100).toFixed(1)) : 0;
+    return { wins, losses, winRate, total };
+  }, [ledger]);
+
+  const historyPreview = useMemo(
+    () => ledger.slice(0, 8),
+    [ledger]
+  );
 
   useEffect(() => {
     if (!publicKey) {
@@ -97,9 +105,20 @@ export default function ProfilePage() {
     })();
   }, []);
 
+  useEffect(() => {
+    setProfile(storedProfile);
+    setEditProfile(storedProfile);
+  }, [storedProfile]);
+
   const handleSaveProfile = () => {
-    setProfile(editProfile);
-    setStoredProfile(editProfile);
+    const nextProfile = {
+      ...editProfile,
+      totalWins: ledgerStats.wins,
+      totalLosses: ledgerStats.losses,
+      winRate: ledgerStats.winRate,
+    };
+    setProfile(nextProfile);
+    setStoredProfile(nextProfile);
     setIsEditing(false);
   };
 
@@ -124,6 +143,31 @@ export default function ProfilePage() {
     } catch {
       /* error surfaced in context */
     }
+  };
+
+  const handleExportBackup = () => {
+    if (!publicKey) return;
+    const json = exportWalletBackup(publicKey);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `drip-backup-${publicKey.slice(0, 8)}.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    toast.success('Backup exported');
+  };
+
+  const handleImportBackup = async (file?: File) => {
+    if (!file) return;
+    const text = await file.text();
+    const result = importWalletBackup(text, publicKey);
+    if (!result.ok) {
+      toast.error(result.error);
+      return;
+    }
+    toast.success('Backup imported');
+    window.location.reload();
   };
 
   return (
@@ -296,7 +340,7 @@ export default function ProfilePage() {
                               color: '#8B5CF6',
                             }}
                           >
-                            {profile.totalWins}
+                            {ledgerStats.wins}
                           </p>
                         </div>
                         <div>
@@ -316,7 +360,7 @@ export default function ProfilePage() {
                               color: '#F59E0B',
                             }}
                           >
-                            {profile.totalLosses}
+                            {ledgerStats.losses}
                           </p>
                         </div>
                         <div>
@@ -336,7 +380,7 @@ export default function ProfilePage() {
                               color: '#10B981',
                             }}
                           >
-                            {profile.winRate}%
+                            {ledgerStats.winRate}%
                           </p>
                         </div>
                       </div>
@@ -383,6 +427,46 @@ export default function ProfilePage() {
                     >
                       {isEditing ? 'CANCEL' : 'EDIT'}
                     </motion.button>
+                    <div className="flex flex-wrap gap-2">
+                      <motion.button
+                        whileHover={{ scale: 1.05 }}
+                        whileTap={{ scale: 0.95 }}
+                        onClick={handleExportBackup}
+                        className="px-4 py-2 font-bold text-xs rounded-lg"
+                        style={{
+                          fontFamily: "'Syne', sans-serif",
+                          background: 'rgba(139, 92, 246, 0.1)',
+                          color: '#A78BFA',
+                          border: '1px solid rgba(139, 92, 246, 0.3)',
+                        }}
+                      >
+                        EXPORT BACKUP
+                      </motion.button>
+                      <motion.button
+                        whileHover={{ scale: 1.05 }}
+                        whileTap={{ scale: 0.95 }}
+                        onClick={() => importInputRef.current?.click()}
+                        className="px-4 py-2 font-bold text-xs rounded-lg"
+                        style={{
+                          fontFamily: "'Syne', sans-serif",
+                          background: 'rgba(245, 158, 11, 0.12)',
+                          color: '#F59E0B',
+                          border: '1px solid rgba(245, 158, 11, 0.3)',
+                        }}
+                      >
+                        IMPORT BACKUP
+                      </motion.button>
+                      <input
+                        ref={importInputRef}
+                        type="file"
+                        accept="application/json"
+                        style={{ display: 'none' }}
+                        onChange={(e) => {
+                          void handleImportBackup(e.target.files?.[0]);
+                          e.currentTarget.value = '';
+                        }}
+                      />
+                    </div>
                   </div>
                 </motion.div>
 
@@ -514,13 +598,13 @@ export default function ProfilePage() {
                 {/* Achievements Section */}
                 <AchievementBadges
                   stats={{
-                    totalWins: profile.totalWins,
-                    totalLosses: profile.totalLosses,
-                    winRate: profile.winRate,
-                    totalMatches: profile.totalWins + profile.totalLosses,
-                    consecutiveWins: Math.floor(profile.totalWins * 0.3),
-                    highestWinStreak: Math.floor(profile.totalWins * 0.4),
-                    totalEarnings: profile.totalWins * 75,
+                    totalWins: ledgerStats.wins,
+                    totalLosses: ledgerStats.losses,
+                    winRate: ledgerStats.winRate,
+                    totalMatches: ledgerStats.total,
+                    consecutiveWins: Math.floor(ledgerStats.wins * 0.3),
+                    highestWinStreak: Math.floor(ledgerStats.wins * 0.4),
+                    totalEarnings: ledgerStats.wins * 75,
                     cardsCollected: assets.length,
                   } as PlayerStats}
                 />
@@ -755,7 +839,7 @@ export default function ProfilePage() {
                       className="drip-panel p-6"
                     >
                       <div className="space-y-3">
-                        {DUMMY_LEDGER.map((entry, index) => (
+                        {historyPreview.map((entry, index) => (
                           <motion.div
                             key={entry.id}
                             initial={{ opacity: 0, x: -20 }}
