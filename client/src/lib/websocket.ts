@@ -55,14 +55,18 @@ class MatchmakingService {
   constructor(playerId: string, wsUrl?: string) {
     this.playerId = playerId;
     // Use current location for WebSocket URL if not provided
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    if (wsUrl) {
-      this.url = wsUrl;
-    } else {
-      const base = `${protocol}//${window.location.host}/ws/matchmaking`;
-      this.url = `${base}?playerId=${encodeURIComponent(playerId)}`;
-    }
+    const envWs = (import.meta.env.VITE_WS_URL as string | undefined)?.trim();
+  if (wsUrl) {
+    this.url = wsUrl;
+  } else if (envWs) {
+    const sep = envWs.includes("?") ? "&" : "?";
+    this.url = `${envWs}${sep}playerId=${encodeURIComponent(playerId)}`;
+  } else {
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const base = `${protocol}//${window.location.host}/ws/matchmaking`;
+    this.url = `${base}?playerId=${encodeURIComponent(playerId)}`;
   }
+}
 
   /**
    * Connect to WebSocket server
