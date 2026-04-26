@@ -10,6 +10,107 @@ import { getHeliusRpcUrl as buildHeliusRpcUrl } from "@shared/heliusRpc";
 const DEFAULT_DECK_LIMIT = 52;
 const POWER_MIN = 2;
 const POWER_MAX = 10;
+const TIER_BASE_POWER: Record<string, number> = {
+  common: 4,
+  rare: 5,
+  epic: 6,
+  legendary: 7,
+};
+
+type MetadataAttribute = { trait_type?: string; value?: unknown };
+
+function normalizeLabel(value: unknown): string {
+  return typeof value === "string" ? value.trim().toLowerCase() : "";
+}
+
+function getInlineMetadata(asset: DASAsset): any {
+  const content = asset.content as any;
+  return content?.metadata ?? {};
+}
+
+function getAssetAttributes(asset: DASAsset): MetadataAttribute[] {
+  const metadata = getInlineMetadata(asset);
+  const attributes = metadata?.attributes;
+  return Array.isArray(attributes) ? attributes : [];
+}
+
+function getAttributeValue(asset: DASAsset, ...traitNames: string[]): unknown {
+  const wanted = new Set(traitNames.map((name) => name.trim().toLowerCase()));
+  const attrs = getAssetAttributes(asset);
+  for (const attr of attrs) {
+    const key = normalizeLabel(attr?.trait_type);
+    if (wanted.has(key)) return attr?.value;
+  }
+  return undefined;
+}
+
+function parsePercentLike(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value !== "string") return null;
+  const cleaned = value.replace("%", "").trim();
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : null;
+}
+
+function parseNumberLike(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value !== "string") return null;
+  const n = Number(value.trim());
+  return Number.isFinite(n) ? n : null;
+}
+
+function hashAssetIdToPower(assetId: string): number {
+  // Deterministic fallback so real-match grading is not random.
+  let hash = 0;
+  for (let i = 0; i < assetId.length; i++) {
+    hash = (hash * 31 + assetId.charCodeAt(i)) >>> 0;
+  }
+  return POWER_MIN + (hash % (POWER_MAX - POWER_MIN + 1));
+}
+
+function deriveTierBasePower(asset: DASAsset): number {
+  const metadata = getInlineMetadata(asset);
+  const tierRaw =
+    getAttributeValue(asset, "tier", "rarity") ??
+    metadata?.tier ??
+    metadata?.rarity;
+
+  const tier = normalizeLabel(tierRaw);
+  if (tier in TIER_BASE_POWER) return TIER_BASE_POWER[tier];
+  return hashAssetIdToPower(asset.id);
+}
+
+function deriveDynamicBalanceDelta(asset: DASAsset): number {
+  // Optional metadata-driven seasonal balancing.
+  // If present and statistically significant upstream, apply:
+  // winRate > 58% => -1, usageRate < 5% => +1
+  const winRate =
+    parsePercentLike(getAttributeValue(asset, "win rate", "winrate")) ??
+    parsePercentLike(getInlineMetadata(asset)?.winRate);
+  const usageRate =
+    parsePercentLike(getAttributeValue(asset, "usage rate", "usagerate")) ??
+    parsePercentLike(getInlineMetadata(asset)?.usageRate);
+
+  if (winRate !== null && winRate > 58) return -1;
+  if (usageRate !== null && usageRate < 5) return 1;
+  return 0;
+}
+
+function deriveLoyaltyUtility(asset: DASAsset): number {
+  // Keep loyalty impact tiny and capped for fairness.
+  const heldDays =
+    parseNumberLike(getAttributeValue(asset, "held days", "ownership age days")) ??
+    parseNumberLike(getInlineMetadata(asset)?.heldDays);
+  if (heldDays === null || heldDays < 365) return 0;
+  return Math.min(0.25, Math.floor(heldDays / 365) * 0.05);
+}
+
+function deriveRealMatchPower(asset: DASAsset): number {
+  const basePower = deriveTierBasePower(asset);
+  const balanceDelta = deriveDynamicBalanceDelta(asset);
+  const loyaltyUtility = deriveLoyaltyUtility(asset);
+  return Math.max(POWER_MIN, Math.min(POWER_MAX, basePower + balanceDelta + loyaltyUtility));
+}
 
 function getHeliusRpcUrl(): string {
   const env = import.meta.env;
@@ -124,8 +225,7 @@ export function assetToGameCard(asset: DASAsset, power?: number): GameCard {
     content?.metadata?.image ??
     "";
 
-  // Use provided power or generate random
-  const cardPower = power ?? (POWER_MIN + Math.floor(Math.random() * (POWER_MAX - POWER_MIN + 1)));
+  const cardPower = power ?? hashAssetIdToPower(asset.id);
 
   return {
     assetId: asset.id,
@@ -137,7 +237,11 @@ export function assetToGameCard(asset: DASAsset, power?: number): GameCard {
 
 /**
  * Fetch wallet's DRiP assets and build cards for a deck.
- * Assigns random power 2–10 to each. Returns up to maxCards (default 52).
+ * Real-match power grading:
+ * 1) metadata tier base power
+ * 2) dynamic balancing delta from optional win/usage stats
+ * 3) tiny capped loyalty utility
+ * Returns up to maxCards (default 52).
  */
 export async function fetchDripAssetsForDeck(
   ownerAddress: string,
@@ -158,7 +262,7 @@ export async function fetchDripAssetsForDeck(
       
       for (const asset of dripOnly) {
         if (all.length >= cap) break;
-        const power = POWER_MIN + Math.floor(Math.random() * (POWER_MAX - POWER_MIN + 1));
+        const power = deriveRealMatchPower(asset);
         all.push(assetToGameCard(asset, power));
       }
       

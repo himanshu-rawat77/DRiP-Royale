@@ -161,15 +161,7 @@ interface UserProfile {
 - Back button to return to Vault
 - Start Match and Reset buttons
 
-**Props**:
-```typescript
-interface DifficultySelectorProps {
-  selectedDifficulty: AIDifficulty;
-  onSelectDifficulty: (difficulty: AIDifficulty) => void;
-  onStart: () => void;
-  onBack?: () => void;
-}
-```
+
 
 ### 2. AI Strategy Engine
 
