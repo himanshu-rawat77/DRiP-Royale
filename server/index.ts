@@ -4,6 +4,8 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { createMatchmakingWsServer } from "./matchmaking-ws";
 import { createEscrowRouter } from "./escrow-routes";
+import { createTokenomicsRouter } from "./tokenomics-routes";
+import { createSoloCampaignRouter } from "./solo-campaign-routes";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -14,6 +16,8 @@ async function startServer() {
   const matchmaking = createMatchmakingWsServer();
 
   app.use("/api/escrow", createEscrowRouter());
+  app.use("/api/tokenomics", createTokenomicsRouter());
+  app.use("/api/campaigns", createSoloCampaignRouter());
 
   server.on("upgrade", (req, socket, head) => {
     const url = req.url || "";

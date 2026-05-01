@@ -7,6 +7,8 @@ import { defineConfig, type Plugin, type ViteDevServer } from "vite";
 import { vitePluginManusRuntime } from "vite-plugin-manus-runtime";
 import { createMatchmakingWsServer } from "./server/matchmaking-ws";
 import { createEscrowRouter } from "./server/escrow-routes";
+import { createTokenomicsRouter } from "./server/tokenomics-routes";
+import { createSoloCampaignRouter } from "./server/solo-campaign-routes";
 
 // =============================================================================
 // Manus Debug Collector - Vite Plugin
@@ -102,6 +104,8 @@ function vitePluginManusDebugCollector(): Plugin {
     configureServer(server: ViteDevServer) {
       const matchmaking = createMatchmakingWsServer();
       server.middlewares.use("/api/escrow", createEscrowRouter());
+      server.middlewares.use("/api/tokenomics", createTokenomicsRouter());
+      server.middlewares.use("/api/campaigns", createSoloCampaignRouter());
       server.httpServer?.on("upgrade", (req, socket, head) => {
         try {
           const url = req.url || "";

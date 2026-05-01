@@ -18,7 +18,15 @@ import {
 import { createAIStrategy } from '@/lib/aiStrategy';
 import { getMatchmakingService, type MatchmakingMessage } from '@/lib/websocket';
 import { fetchEscrowConfig, ensureEscrowDepositsForMatch } from '@/lib/escrowClient';
+import {
+  continueCampaignRun,
+  exitCampaignRun,
+  pickCampaignCard,
+  startCampaignRun,
+  type CampaignRunState,
+} from '@/lib/soloCampaignClient';
 import { usePhantomWallet } from '@/contexts/PhantomWalletContext';
+import { clearCampaignSession, readCampaignSession, writeCampaignSession } from '@/lib/campaignSession';
 import type { LocalMatch } from '@/lib/localMatchEngine';
 import type { GameCard } from '@/lib/types';
 import type { AIDifficulty } from '@/lib/aiStrategy';
@@ -44,13 +52,15 @@ export default function ArenaPage() {
   const { publicKey } = usePhantomWallet();
   const { selectedDeck } = useDeck();
   const { isDummyMode, selectedDummyCards } = useDummyDeck();
-  const [ledger, setLedger] = useLedgerStorage();
+  const [ledger, setLedger] = useLedgerStorage(publicKey);
   const ledgerRef = useRef(ledger);
   ledgerRef.current = ledger;
 
   const [mpSession] = useState<MpSession>(() => readMpSession());
   // Difficulty selection is only for local demo vs AI (not multiplayer).
-  const [showDifficultySelector, setShowDifficultySelector] = useState(() => isDummyMode && !readMpSession());
+  const [showDifficultySelector, setShowDifficultySelector] = useState(
+    () => isDummyMode && !readMpSession() && !readCampaignSession()
+  );
   const [selectedDifficulty, setSelectedDifficulty] = useState<AIDifficulty>('medium');
   const [aiStrategy, setAiStrategy] = useState(createAIStrategy('medium'));
   const [youAre, setYouAre] = useState<'player1' | 'player2' | null>(null);
@@ -59,6 +69,9 @@ export default function ArenaPage() {
   const [match, setMatch] = useState<LocalMatch | null>(null);
   const [showSettlement, setShowSettlement] = useState(false);
   const [lastFlippedCards, setLastFlippedCards] = useState<{ player1: any; player2: any } | null>(null);
+  const [campaignRun, setCampaignRun] = useState<CampaignRunState | null>(null);
+  const [campaignBusy, setCampaignBusy] = useState(false);
+  const [campaignSession] = useState(() => readCampaignSession());
 
   // Handle difficulty selection
   const handleSelectDifficulty = (difficulty: AIDifficulty) => {
@@ -98,6 +111,7 @@ export default function ArenaPage() {
 
   // Solo / vs AI only — multiplayer state comes from the WebSocket server.
   useEffect(() => {
+    if (campaignSession) return;
     if (mpSession) return;
     if (!isDummyMode && !match) {
       setShowDifficultySelector(false);
@@ -109,6 +123,39 @@ export default function ArenaPage() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isDummyMode, mpSession]);
+
+  useEffect(() => {
+    if (!campaignSession || !selectedDeck?.length || !publicKey || campaignRun) return;
+    let cancelled = false;
+    setCampaignBusy(true);
+    void (async () => {
+      try {
+        const run = await startCampaignRun({
+          campaignId: campaignSession.campaignId,
+          walletAddress: publicKey,
+          deck: selectedDeck,
+          difficulty: campaignSession.difficulty,
+          useTicket: false,
+        });
+        if (cancelled) return;
+        setCampaignRun(run);
+        setMatch(run.match);
+        writeCampaignSession({
+          ...campaignSession,
+          runId: run.runId,
+        });
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : 'Could not start campaign run');
+        clearCampaignSession();
+        navigate('/campaigns');
+      } finally {
+        if (!cancelled) setCampaignBusy(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [campaignSession, selectedDeck, publicKey, campaignRun, navigate]);
 
   useEffect(() => {
     if (!mpSession || !selectedDeck?.length) return;
@@ -213,6 +260,37 @@ export default function ArenaPage() {
 
   const handlePickCard = (player: 'player1' | 'player2', assetId: string) => {
     if (!match?.isActive) return;
+    if (campaignSession && campaignRun && publicKey) {
+      if (player !== 'player1') return;
+      if (campaignRun.status !== 'in_progress' || match.pickTurn !== 'player1') return;
+      setCampaignBusy(true);
+      void (async () => {
+        try {
+          const next = await pickCampaignCard({
+            runId: campaignRun.runId,
+            walletAddress: publicKey,
+            assetId,
+          });
+          setCampaignRun(next);
+          setMatch(next.match);
+          if (next.match && next.match.roundResults.length > 0) {
+            const lastResult = next.match.roundResults[next.match.roundResults.length - 1];
+            setLastFlippedCards({
+              player1: lastResult.player1Card,
+              player2: lastResult.player2Card,
+            });
+          }
+          if (next.status === 'stage_won' || next.status === 'lost' || next.status === 'completed') {
+            setShowSettlement(true);
+          }
+        } catch (e) {
+          toast.error(e instanceof Error ? e.message : 'Could not play card');
+        } finally {
+          setCampaignBusy(false);
+        }
+      })();
+      return;
+    }
     if (mpSession) {
       if (!youAre || player !== youAre || match.pickTurn !== youAre || match.picksThisRound[youAre]) return;
       const service = getMatchmakingService(mpSession.playerId);
@@ -254,6 +332,7 @@ export default function ArenaPage() {
 
   // Demo / AI: opponent picks automatically when it's their turn.
   useEffect(() => {
+    if (campaignSession) return;
     if (mpSession || !match?.isActive || !isDummyMode || match.pickTurn !== 'player2') return;
     if (match.picksThisRound.player2) return;
 
@@ -309,6 +388,18 @@ export default function ArenaPage() {
   ]);
 
   const handleReturnHome = () => {
+    if (campaignSession && campaignRun && publicKey) {
+      void exitCampaignRun({
+        runId: campaignRun.runId,
+        walletAddress: publicKey,
+      }).catch(() => {});
+      clearCampaignSession();
+      navigate('/campaigns');
+      return;
+    }
+    if (campaignSession) {
+      clearCampaignSession();
+    }
     navigate('/');
   };
 
@@ -317,6 +408,37 @@ export default function ArenaPage() {
   };
 
   const handlePlayAgain = () => {
+    if (campaignSession) {
+      if (!campaignRun || !publicKey) {
+        navigate('/vault');
+        return;
+      }
+      if (campaignRun.status === 'stage_won') {
+        setCampaignBusy(true);
+        void continueCampaignRun({
+          runId: campaignRun.runId,
+          walletAddress: publicKey,
+        })
+          .then((next) => {
+            setCampaignRun(next);
+            setMatch(next.match);
+            setShowSettlement(false);
+            setLastFlippedCards(null);
+          })
+          .catch((e) => {
+            toast.error(e instanceof Error ? e.message : 'Could not continue to next stage');
+          })
+          .finally(() => setCampaignBusy(false));
+        return;
+      }
+      void exitCampaignRun({
+        runId: campaignRun.runId,
+        walletAddress: publicKey,
+      }).catch(() => {});
+      clearCampaignSession();
+      navigate('/campaigns');
+      return;
+    }
     sessionStorage.removeItem('drip-multiplayer');
     mpSettlementDone.current = false;
     setYouAre(null);
@@ -349,8 +471,23 @@ export default function ArenaPage() {
         <TopBar />
         <main className="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center">
           <p style={{ color: '#A78BFA' }}>
-            {mpSession ? 'Connecting to your match… Submitting deck to the room.' : 'Loading match…'}
+            {campaignSession
+              ? campaignBusy
+                ? 'Initializing campaign stage…'
+                : 'Campaign deck missing. Return to Vault to build deck.'
+              : mpSession
+                ? 'Connecting to your match… Submitting deck to the room.'
+                : 'Loading match…'}
           </p>
+          {campaignSession && !campaignBusy && (
+            <button
+              onClick={() => navigate('/vault')}
+              className="mt-2 px-4 py-2 rounded-lg text-xs font-bold"
+              style={{ background: 'rgba(139,92,246,0.2)', color: '#A78BFA' }}
+            >
+              BACK TO VAULT
+            </button>
+          )}
           {mpSession && (!selectedDeck || selectedDeck.length === 0) && (
             <p className="max-w-md text-sm" style={{ color: 'rgba(255,255,255,0.45)' }}>
               No deck found. Return to the vault and queue again with a selected deck.
@@ -435,6 +572,9 @@ export default function ArenaPage() {
                   fontSize: '0.875rem',
                 }}
               >
+                {campaignSession && campaignRun
+                  ? `${campaignRun.stageLabel} · `
+                  : ''}
                 Round {Math.min(match.currentRound + 1, match.maxRounds)} of {match.maxRounds}
                 {match.pickTurn && match.isActive
                   ? ` · ${match[match.pickTurn].name}'s turn — choose a card from your deck`
@@ -495,7 +635,9 @@ export default function ArenaPage() {
                       className="mx-auto flex aspect-[2/3] max-w-[140px] items-center justify-center rounded-lg border border-dashed border-amber-500/30 text-xs"
                       style={{ color: 'rgba(255,255,255,0.35)' }}
                     >
-                      {isDummyMode && match.pickTurn === 'player2'
+                      {campaignSession
+                        ? 'Campaign AI is choosing…'
+                        : isDummyMode && match.pickTurn === 'player2'
                         ? 'Opponent is choosing…'
                         : mpSession && youAre !== 'player2' && match.pickTurn === 'player2'
                           ? 'Opponent is choosing…'
@@ -665,7 +807,8 @@ export default function ArenaPage() {
                         const canPick =
                           match.pickTurn === 'player1' &&
                           !match.picksThisRound.player1 &&
-                          (!mpSession || youAre === 'player1');
+                          (!mpSession || youAre === 'player1') &&
+                          !campaignBusy;
                         return (
                           <motion.button
                             key={card.assetId}
@@ -846,7 +989,7 @@ export default function ArenaPage() {
                     </p>
                     <div className="flex max-h-52 flex-wrap gap-2 overflow-y-auto pr-1">
                       {match.player2.deck.map((card) => {
-                        if (isDummyMode || (mpSession && youAre !== 'player2')) {
+                        if (campaignSession || isDummyMode || (mpSession && youAre !== 'player2')) {
                           return (
                             <div
                               key={card.assetId}
@@ -1057,7 +1200,7 @@ export default function ArenaPage() {
                         letterSpacing: '0.05em',
                       }}
                     >
-                      PLAY AGAIN
+                      {campaignSession && campaignRun?.status === 'stage_won' ? 'NEXT STAGE' : 'PLAY AGAIN'}
                     </motion.button>
 
                     <motion.button
@@ -1073,7 +1216,7 @@ export default function ArenaPage() {
                         letterSpacing: '0.05em',
                       }}
                     >
-                      HOME
+                      {campaignSession ? 'RETURN TO CAMPAIGNS' : 'HOME'}
                     </motion.button>
                   </motion.div>
                 </motion.div>

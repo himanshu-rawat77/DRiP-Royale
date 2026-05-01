@@ -9,6 +9,7 @@ import { useDummyDeck } from '@/contexts/DummyDeckContext';
 import { usePhantomWallet } from '@/contexts/PhantomWalletContext';
 import { useHeliusAssets } from '@/hooks/useHeliusAssets';
 import { NFT_CARDS } from '@/lib/cardData';
+import { clearCampaignSession, readCampaignSession } from '@/lib/campaignSession';
 import type { GameCard } from '@/lib/types';
 
 const VAULT_BG =
@@ -28,6 +29,17 @@ export default function VaultPage() {
   } = useDummyDeck();
   const { assets, loading, error, loadAssets, clearError, reset } = useHeliusAssets();
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [campaignMode, setCampaignMode] = useState(false);
+
+  useEffect(() => {
+    const activeCampaign = !!readCampaignSession();
+    setCampaignMode(activeCampaign);
+    if (activeCampaign) {
+      // Campaign mode is intentionally demo-only for MVP fairness/testing.
+      setIsDummyMode(true);
+      setSelected(new Set());
+    }
+  }, []);
 
   const refreshAssets = useCallback(async () => {
     if (!publicKey) return;
@@ -36,6 +48,11 @@ export default function VaultPage() {
   }, [publicKey, loadAssets, clearError]);
 
   useEffect(() => {
+    if (campaignMode) {
+      reset();
+      setSelected(new Set());
+      return;
+    }
     if (!publicKey) {
       reset();
       setSelected(new Set());
@@ -75,8 +92,24 @@ export default function VaultPage() {
   };
 
   const handleBuildDeck = () => {
+    const campaignSession = readCampaignSession();
+    if (campaignSession && !isDummyMode) {
+      toast.error("Campaign mode uses demo campaign cards only.");
+      setIsDummyMode(true);
+      return;
+    }
     if (isDummyMode) {
       if (selectedDummyCards.length < 5) return;
+      if (campaignSession) {
+        const selectedCards: GameCard[] = selectedDummyCards.map((card) => ({
+          assetId: card.id.toString(),
+          imageUri: card.image,
+          name: card.name,
+          power: card.power,
+        }));
+        setSelectedDeck(selectedCards);
+        setDeckSize(selectedCards.length);
+      }
       navigate('/arena');
       return;
     }
@@ -85,7 +118,7 @@ export default function VaultPage() {
     if (selectedCards.length < 5) return;
     setSelectedDeck(selectedCards);
     setDeckSize(selectedCards.length);
-    navigate('/matchmaking');
+    navigate(campaignSession ? '/arena' : '/matchmaking');
   };
 
   const handleClearSelection = () => {
@@ -101,10 +134,16 @@ export default function VaultPage() {
     clearDummyDeck();
   };
 
+  const handleExitCampaign = () => {
+    clearCampaignSession();
+    setCampaignMode(false);
+    setIsDummyMode(false);
+  };
+
   const selectedCount = isDummyMode ? selectedDummyCards.length : selected.size;
   const canEnterWallet = selected.size >= 5 && selected.size <= 52 && assets.length > 0 && !loading;
   const canEnterDummy = isDummyMode && selectedDummyCards.length >= 5;
-  const canEnter = isDummyMode ? canEnterDummy : canEnterWallet;
+  const canEnter = campaignMode ? canEnterDummy : isDummyMode ? canEnterDummy : canEnterWallet;
 
   return (
     <div className="min-h-screen flex flex-col bg-black">
@@ -161,7 +200,7 @@ export default function VaultPage() {
                   lineHeight: 1.2,
                 }}
               >
-                Build Your Deck
+                {campaignMode ? 'Build Your Campaign Deck' : 'Build Your Deck'}
               </h1>
               <p
                 className="text-body"
@@ -170,13 +209,34 @@ export default function VaultPage() {
                   fontSize: '1rem',
                 }}
               >
-                {isDummyMode
+                {campaignMode
+                  ? 'Campaign mode is active. Build 5–52 cards here, then continue to the Arena for staged matches.'
+                  : isDummyMode
                   ? 'Build your deck with demo cards. Select 5–52 cards to jump into the arena.'
                   : publicKey
                     ? 'Select 5–52 DRiP cards from your wallet to queue for a match.'
                     : 'Connect Phantom for your on-chain collection, or try a demo deck without a wallet.'}
               </p>
             </motion.div>
+
+            {campaignMode && (
+              <motion.div
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="drip-panel p-4 mb-8 flex items-center justify-between gap-4"
+              >
+                <p className="text-xs" style={{ color: '#A78BFA', fontFamily: "'IBM Plex Mono', monospace" }}>
+                  CAMPAIGN FLOW ACTIVE · Vault → Arena (1 → 2 → 3 → Boss)
+                </p>
+                <button
+                  onClick={handleExitCampaign}
+                  className="px-3 py-2 rounded-lg text-xs font-bold"
+                  style={{ background: 'rgba(245,158,11,0.16)', color: '#F59E0B' }}
+                >
+                  EXIT CAMPAIGN
+                </button>
+              </motion.div>
+            )}
 
             {!publicKey && !isDummyMode && (
               <motion.div
@@ -325,7 +385,7 @@ export default function VaultPage() {
                         border: '1px solid rgba(255, 255, 255, 0.12)',
                       }}
                     >
-                      EXIT DEMO
+                      {campaignMode ? 'EXIT DEMO (CAMPAIGN)' : 'EXIT DEMO'}
                     </motion.button>
                   </div>
                 </motion.div>
@@ -439,7 +499,9 @@ export default function VaultPage() {
                   >
                     {selectedDummyCards.length < 5
                       ? `SELECT ${5 - selectedDummyCards.length} MORE CARDS`
-                      : 'ENTER THE ARENA'}
+                      : campaignMode
+                        ? 'ENTER CAMPAIGN ARENA'
+                        : 'ENTER THE ARENA'}
                   </motion.button>
                   <p
                     className="text-xs"
@@ -726,7 +788,9 @@ export default function VaultPage() {
                   >
                     {selectedCount < 5
                       ? `SELECT ${5 - selectedCount} MORE CARDS`
-                      : 'ENTER THE ARENA'}
+                      : campaignMode
+                        ? 'ENTER CAMPAIGN ARENA'
+                        : 'ENTER THE ARENA'}
                   </motion.button>
 
                   <p
