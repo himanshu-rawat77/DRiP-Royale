@@ -8,6 +8,7 @@ import { custodyEscrowEnabled, getCustodyKeypair, getCustodyPubkeyBase58 } from 
 import { getEscrowRegistrar } from "./escrow-registry";
 import { getServerHeliusRpcUrl } from "./helius-rpc";
 import { verifyCompressedAssetsInCustody } from "./escrow-verify";
+import { dbQuery } from "./db";
 
 type DepositSession = {
   roomId: string;
@@ -48,6 +49,26 @@ export function createEscrowRouter(): Router {
     res.statusCode = status;
     if (typeof res?.setHeader === "function") res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify(payload));
+  };
+
+  const isPlayerInRoom = async (roomId: string, playerId: string): Promise<boolean> => {
+    const reg = getEscrowRegistrar();
+    if (reg?.roomHasPlayer(roomId, playerId)) return true;
+    // Fallback for multi-instance production where WS room state lives in another process.
+    try {
+      const out = await dbQuery<{ present: boolean }>(
+        `
+        select exists(
+          select 1 from multiplayer_room_players
+          where room_id=$1 and player_id=$2 and active=true
+        ) as present
+        `,
+        [roomId, playerId]
+      );
+      return !!out.rows[0]?.present;
+    } catch {
+      return false;
+    }
   };
 
   r.get("/config", (_req, res) => {
@@ -110,7 +131,7 @@ export function createEscrowRouter(): Router {
     }
   });
 
-  r.post("/deposit-record", (req, res) => {
+  r.post("/deposit-record", async (req, res) => {
     const body = req.body as {
       roomId?: string;
       playerId?: string;
@@ -123,8 +144,7 @@ export function createEscrowRouter(): Router {
       return;
     }
 
-    const reg = getEscrowRegistrar();
-    if (!reg || !reg.roomHasPlayer(roomId, playerId)) {
+    if (!(await isPlayerInRoom(roomId, playerId))) {
       sendJson(res, 400, { error: "Room not found or player not in room" });
       return;
     }
@@ -240,8 +260,7 @@ export function createEscrowRouter(): Router {
       return;
     }
 
-    const reg = getEscrowRegistrar();
-    if (!reg || !reg.roomHasPlayer(roomId, playerId)) {
+    if (!(await isPlayerInRoom(roomId, playerId))) {
       sendJson(res, 400, { error: "Room not found or player not in room" });
       return;
     }
@@ -269,7 +288,23 @@ export function createEscrowRouter(): Router {
       });
     }
 
-    reg.markDepositReady(roomId, playerId, walletAddress);
+    try {
+      await dbQuery(
+        `
+        insert into multiplayer_escrow_ready (room_id, player_id, wallet_address, ready_at, updated_at)
+        values ($1,$2,$3,now(),now())
+        on conflict (room_id, player_id)
+        do update set wallet_address=$3, ready_at=now(), updated_at=now()
+        `,
+        [roomId, playerId, walletAddress]
+      );
+    } catch (e) {
+      // Keep existing in-memory path working if DB table isn't available.
+      console.error("[escrow] could not persist escrow ready marker", e);
+    }
+
+    const reg = getEscrowRegistrar();
+    reg?.markDepositReady(roomId, playerId, walletAddress);
     sendJson(res, 200, { ok: true });
   });
 

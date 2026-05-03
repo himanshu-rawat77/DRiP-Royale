@@ -1,6 +1,7 @@
 import type { IncomingMessage } from "http";
 import { WebSocketServer, type WebSocket } from "ws";
 import { nanoid } from "nanoid";
+import { dbQuery } from "./db";
 import {
   initializeLocalMatch,
   submitPick,
@@ -75,6 +76,38 @@ function now() {
   return Date.now();
 }
 
+async function upsertRoomPlayers(roomId: string, players: [string, string]): Promise<void> {
+  try {
+    await dbQuery(
+      `
+      insert into multiplayer_room_players (room_id, player_id, active, updated_at)
+      values ($1, $2, true, now()), ($1, $3, true, now())
+      on conflict (room_id, player_id)
+      do update set active=true, updated_at=now()
+      `,
+      [roomId, players[0], players[1]]
+    );
+  } catch (e) {
+    console.error("[matchmaking-ws] could not upsert room players", e);
+  }
+}
+
+async function deactivateRoomPlayers(roomId: string): Promise<void> {
+  try {
+    await dbQuery(`update multiplayer_room_players set active=false, updated_at=now() where room_id=$1`, [roomId]);
+  } catch (e) {
+    console.error("[matchmaking-ws] could not deactivate room players", e);
+  }
+}
+
+async function clearRoomEscrowReady(roomId: string): Promise<void> {
+  try {
+    await dbQuery(`delete from multiplayer_escrow_ready where room_id=$1`, [roomId]);
+  } catch (e) {
+    console.error("[matchmaking-ws] could not clear room escrow rows", e);
+  }
+}
+
 export function createMatchmakingWsServer() {
   const wss = new WebSocketServer({ noServer: true });
 
@@ -121,15 +154,33 @@ export function createMatchmakingWsServer() {
   }
 
   function tryStartRoomMatch(room: RoomState) {
-    if (room.match) return;
-    if (!escrowDepositsSatisfied(room)) return;
-    const [aId, bId] = room.players;
-    const da = room.decks[aId];
-    const db = room.decks[bId];
-    if (!da?.length || !db?.length) return;
-    room.match = initializeLocalMatch(da, db, aId, bId);
-    console.log(`[matchmaking-ws] match started in room ${room.roomId}`);
-    broadcastGameState(room);
+    void (async () => {
+      if (room.match) return;
+      // Load escrow-ready markers from shared DB so HTTP confirms from other instances
+      // can still start this room on the WS instance that owns the in-memory match state.
+      try {
+        const out = await dbQuery<{ player_id: string; wallet_address: string }>(
+          `select player_id, wallet_address from multiplayer_escrow_ready where room_id=$1`,
+          [room.roomId]
+        );
+        for (const row of out.rows) {
+          if (!room.players.includes(row.player_id)) continue;
+          room.escrow.playerWallets[row.player_id] = row.wallet_address;
+          room.escrow.depositOk[row.player_id] = true;
+        }
+      } catch {
+        // Keep working in single-instance/dev mode even if DB table is unavailable.
+      }
+
+      if (!escrowDepositsSatisfied(room)) return;
+      const [aId, bId] = room.players;
+      const da = room.decks[aId];
+      const db = room.decks[bId];
+      if (!da?.length || !db?.length) return;
+      room.match = initializeLocalMatch(da, db, aId, bId);
+      console.log(`[matchmaking-ws] match started in room ${room.roomId}`);
+      broadcastGameState(room);
+    })();
   }
 
   function removeFromQueue(playerId: string) {
@@ -167,6 +218,7 @@ export function createMatchmakingWsServer() {
       rooms.set(roomId, room);
       a.roomId = roomId;
       b.roomId = roomId;
+      void upsertRoomPlayers(roomId, room.players);
       console.log(`[matchmaking-ws] match created roomId=${roomId} a=${aId} b=${bId}`);
 
       const roomPayload: MatchRoom = {
@@ -335,6 +387,8 @@ export function createMatchmakingWsServer() {
         const opponent = getOpponentInRoom(roomId, client.playerId);
 
         rooms.delete(roomId);
+        void deactivateRoomPlayers(roomId);
+        void clearRoomEscrowReady(roomId);
         client.roomId = undefined;
         if (opponent) opponent.roomId = undefined;
 
@@ -380,6 +434,8 @@ export function createMatchmakingWsServer() {
         const roomId = client.roomId;
         const opponent = getOpponentInRoom(roomId, client.playerId);
         rooms.delete(roomId);
+        void deactivateRoomPlayers(roomId);
+        void clearRoomEscrowReady(roomId);
         if (opponent) {
           opponent.roomId = undefined;
           safeSend(opponent.ws, {
