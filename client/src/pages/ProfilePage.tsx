@@ -10,6 +10,7 @@ import { PlayerStats } from '@/lib/achievements';
 import { exportWalletBackup, importWalletBackup, useLedgerStorage, useProfileStorage } from '@/hooks/useLocalStorage';
 import { usePhantomWallet } from '@/contexts/PhantomWalletContext';
 import { fetchRoyaleWalletState, fetchTokenomicsConfig } from '@/lib/tokenomicsClient';
+import { fetchMatchHistory, fetchUserRecord, setUserRole, type MatchHistoryEntry, type UserRole } from '@/lib/usersClient';
 
 const PROFILE_BG = 'https://d2xsxph8kpxj0f.cloudfront.net/310519663486830791/WuCyWqVdFPbfCADWcJauKD/card-pattern-bg-By5zBsUSv6CrFLKpdTgQ8r.webp';
 
@@ -51,22 +52,27 @@ export default function ProfilePage() {
   const [royaleBalance, setRoyaleBalance] = useState<number>(0);
   const [challengeTickets, setChallengeTickets] = useState<number>(0);
   const [tokenSupply, setTokenSupply] = useState<number | null>(null);
+  const [remoteHistory, setRemoteHistory] = useState<MatchHistoryEntry[]>([]);
+  const [role, setRole] = useState<UserRole | null>(null);
+  const [showRoleModal, setShowRoleModal] = useState(false);
   const importInputRef = useRef<HTMLInputElement | null>(null);
 
   const [profile, setProfile] = useState<UserProfile>(storedProfile);
   const [editProfile, setEditProfile] = useState<UserProfile>(storedProfile);
 
+  const historySource = useMemo(() => (remoteHistory.length > 0 ? remoteHistory : ledger), [remoteHistory, ledger]);
+
   const ledgerStats = useMemo(() => {
-    const wins = ledger.filter((entry) => entry.result === 'WIN').length;
-    const losses = ledger.filter((entry) => entry.result === 'LOSS').length;
+    const wins = historySource.filter((entry) => entry.result === 'WIN').length;
+    const losses = historySource.filter((entry) => entry.result === 'LOSS').length;
     const total = wins + losses;
     const winRate = total > 0 ? Number(((wins / total) * 100).toFixed(1)) : 0;
     return { wins, losses, winRate, total };
-  }, [ledger]);
+  }, [historySource]);
 
   const historyPreview = useMemo(
-    () => ledger.slice(0, 8),
-    [ledger]
+    () => historySource.slice(0, 8),
+    [historySource]
   );
 
   useEffect(() => {
@@ -81,6 +87,9 @@ export default function ProfilePage() {
     if (!publicKey) {
       setRoyaleBalance(0);
       setChallengeTickets(0);
+      setRole(null);
+      setShowRoleModal(false);
+      setRemoteHistory([]);
       return;
     }
     void (async () => {
@@ -90,6 +99,20 @@ export default function ProfilePage() {
         setChallengeTickets(walletState.challengeTickets);
       } catch {
         /* ignore */
+      }
+    })();
+  }, [publicKey]);
+
+  useEffect(() => {
+    if (!publicKey) return;
+    void (async () => {
+      try {
+        const [user, history] = await Promise.all([fetchUserRecord(publicKey), fetchMatchHistory(publicKey)]);
+        setRole(user.role);
+        setShowRoleModal(!user.role);
+        setRemoteHistory(history.entries);
+      } catch {
+        /* fallback to local storage */
       }
     })();
   }, [publicKey]);
@@ -168,6 +191,19 @@ export default function ProfilePage() {
     }
     toast.success('Backup imported');
     window.location.reload();
+  };
+
+  const chooseRole = async (nextRole: UserRole) => {
+    if (!publicKey) return;
+    try {
+      await setUserRole(publicKey, nextRole, profile.username);
+      setRole(nextRole);
+      setShowRoleModal(false);
+      toast.success(`Role set to ${nextRole}`);
+      if (nextRole === 'creator') navigate('/creator');
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Could not set role');
+    }
   };
 
   return (
@@ -300,7 +336,7 @@ export default function ProfilePage() {
                           letterSpacing: '0.1em',
                         }}
                       >
-                        // PLAYER PROFILE
+                        // {role === 'creator' ? 'CREATOR PROFILE' : 'PLAYER PROFILE'}
                       </p>
                       <h1
                         className="text-heading mb-2"
@@ -428,6 +464,22 @@ export default function ProfilePage() {
                       {isEditing ? 'CANCEL' : 'EDIT'}
                     </motion.button>
                     <div className="flex flex-wrap gap-2">
+                      {role === 'creator' && (
+                        <motion.button
+                          whileHover={{ scale: 1.05 }}
+                          whileTap={{ scale: 0.95 }}
+                          onClick={() => navigate('/creator')}
+                          className="px-4 py-2 font-bold text-xs rounded-lg"
+                          style={{
+                            fontFamily: "'Syne', sans-serif",
+                            background: 'rgba(16, 185, 129, 0.12)',
+                            color: '#10B981',
+                            border: '1px solid rgba(16, 185, 129, 0.35)',
+                          }}
+                        >
+                          OPEN CREATOR WORKSPACE
+                        </motion.button>
+                      )}
                       <motion.button
                         whileHover={{ scale: 1.05 }}
                         whileTap={{ scale: 0.95 }}
@@ -942,6 +994,26 @@ export default function ProfilePage() {
         </motion.section>
       </main>
       <Footer />
+      {publicKey && showRoleModal && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 px-4">
+          <div className="w-full max-w-md drip-panel p-6">
+            <p className="text-sm font-bold mb-2" style={{ color: '#FFFFFF', fontFamily: "'Syne', sans-serif" }}>
+              Choose Your Role
+            </p>
+            <p className="text-xs mb-5" style={{ color: 'rgba(255,255,255,0.6)' }}>
+              Pick how you want to use DRiP Royale with this wallet.
+            </p>
+            <div className="grid grid-cols-1 gap-3">
+              <button onClick={() => void chooseRole('player')} className="px-4 py-3 rounded-lg font-bold text-xs" style={{ background: 'rgba(139, 92, 246, 0.2)', color: '#A78BFA' }}>
+                I AM A PLAYER
+              </button>
+              <button onClick={() => void chooseRole('creator')} className="px-4 py-3 rounded-lg font-bold text-xs" style={{ background: 'rgba(245, 158, 11, 0.2)', color: '#F59E0B' }}>
+                I AM A CREATOR
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

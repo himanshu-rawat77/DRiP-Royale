@@ -21,7 +21,8 @@ type MatchmakingMessage = {
     | "match_end"
     | "error"
     | "rejoin_room"
-    | "game_state";
+    | "game_state"
+    | "escrow_status";
   playerId: string;
   roomId?: string;
   deckSize?: number;
@@ -278,9 +279,39 @@ export function createMatchmakingWsServer() {
             const players = [...room.players] as [string, string];
             const wallets = { ...room.escrow.playerWallets };
             const finishedMatch = room.match;
-            void settleEscrowAfterMatch(finishedMatch, players, wallets).catch((e) =>
-              console.error("[escrow] settlement failed", e)
-            );
+            void settleEscrowAfterMatch(finishedMatch, players, wallets)
+              .then((settlement) => {
+                for (const pid of players) {
+                  const c = clientsByPlayerId.get(pid);
+                  if (!c) continue;
+                  safeSend(c.ws, {
+                    type: "escrow_status",
+                    playerId: pid,
+                    roomId,
+                    timestamp: now(),
+                    payload: settlement,
+                  });
+                }
+              })
+              .catch((e) => {
+                console.error("[escrow] settlement failed", e);
+                for (const pid of players) {
+                  const c = clientsByPlayerId.get(pid);
+                  if (!c) continue;
+                  safeSend(c.ws, {
+                    type: "escrow_status",
+                    playerId: pid,
+                    roomId,
+                    timestamp: now(),
+                    payload: {
+                      ok: false,
+                      transferredToWinner: [],
+                      transferredToLoser: [],
+                      failed: [{ assetId: "unknown", target: "winner", error: String(e) }],
+                    },
+                  });
+                }
+              });
           }
           return;
         }

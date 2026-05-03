@@ -5,6 +5,7 @@ const CAMPAIGN_SESSION_KEY = "drip-campaign-session";
 export interface CampaignSession {
   campaignId: string;
   difficulty: CampaignDifficulty;
+  entryId?: string;
   runId?: string;
 }
 

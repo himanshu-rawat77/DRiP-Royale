@@ -99,7 +99,7 @@ export default function VaultPage() {
       return;
     }
     if (isDummyMode) {
-      if (selectedDummyCards.length < 5) return;
+      if (selectedDummyCards.length < 2) return;
       if (campaignSession) {
         const selectedCards: GameCard[] = selectedDummyCards.map((card) => ({
           assetId: card.id.toString(),
@@ -113,9 +113,9 @@ export default function VaultPage() {
       navigate('/arena');
       return;
     }
-    if (selected.size < 5 || !assets.length) return;
+    if (selected.size < 2 || !assets.length) return;
     const selectedCards = assets.filter((card) => selected.has(card.assetId));
-    if (selectedCards.length < 5) return;
+    if (selectedCards.length < 2) return;
     setSelectedDeck(selectedCards);
     setDeckSize(selectedCards.length);
     navigate(campaignSession ? '/arena' : '/matchmaking');
@@ -141,8 +141,8 @@ export default function VaultPage() {
   };
 
   const selectedCount = isDummyMode ? selectedDummyCards.length : selected.size;
-  const canEnterWallet = selected.size >= 5 && selected.size <= 52 && assets.length > 0 && !loading;
-  const canEnterDummy = isDummyMode && selectedDummyCards.length >= 5;
+  const canEnterWallet = selected.size >= 2 && selected.size <= 52 && assets.length > 0 && !loading;
+  const canEnterDummy = isDummyMode && selectedDummyCards.length >= 2;
   const canEnter = campaignMode ? canEnterDummy : isDummyMode ? canEnterDummy : canEnterWallet;
 
   return (
@@ -210,11 +210,11 @@ export default function VaultPage() {
                 }}
               >
                 {campaignMode
-                  ? 'Campaign mode is active. Build 5–52 cards here, then continue to the Arena for staged matches.'
+                  ? 'Campaign mode is active. Build 2–52 cards here, then continue to the Arena for staged matches.'
                   : isDummyMode
-                  ? 'Build your deck with demo cards. Select 5–52 cards to jump into the arena.'
+                  ? 'Build your deck with demo cards. Select 2–52 cards to jump into the arena.'
                   : publicKey
-                    ? 'Select 5–52 DRiP cards from your wallet to queue for a match.'
+                    ? 'Select 2–52 DRiP cards from your wallet to queue for a match.'
                     : 'Connect Phantom for your on-chain collection, or try a demo deck without a wallet.'}
               </p>
             </motion.div>
@@ -497,8 +497,8 @@ export default function VaultPage() {
                       cursor: !canEnterDummy ? 'not-allowed' : 'pointer',
                     }}
                   >
-                    {selectedDummyCards.length < 5
-                      ? `SELECT ${5 - selectedDummyCards.length} MORE CARDS`
+                    {selectedDummyCards.length < 2
+                      ? `SELECT ${2 - selectedDummyCards.length} MORE CARDS`
                       : campaignMode
                         ? 'ENTER CAMPAIGN ARENA'
                         : 'ENTER THE ARENA'}
@@ -786,8 +786,8 @@ export default function VaultPage() {
                       cursor: !canEnter || loading ? 'not-allowed' : 'pointer',
                     }}
                   >
-                    {selectedCount < 5
-                      ? `SELECT ${5 - selectedCount} MORE CARDS`
+                    {selectedCount < 2
+                      ? `SELECT ${2 - selectedCount} MORE CARDS`
                       : campaignMode
                         ? 'ENTER CAMPAIGN ARENA'
                         : 'ENTER THE ARENA'}

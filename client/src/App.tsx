@@ -17,6 +17,7 @@ import ProfilePage from "./pages/ProfilePage";
 import MatchmakingPage from "./pages/MatchmakingPage";
 import DocsPage from "./pages/DocsPage";
 import SoloCampaignPage from "./pages/SoloCampaignPage";
+import CreatorDashboardPage from "./pages/CreatorDashboardPage";
 
 function Router() {
   return (
@@ -30,6 +31,7 @@ function Router() {
       <Route path={"/matchmaking"} component={MatchmakingPage} />
       <Route path={"/docs"} component={DocsPage} />
       <Route path={"/campaigns"} component={SoloCampaignPage} />
+      <Route path={"/creator"} component={CreatorDashboardPage} />
       <Route path={"/404"} component={NotFound} />
       {/* Final fallback route */}
       <Route component={NotFound} />

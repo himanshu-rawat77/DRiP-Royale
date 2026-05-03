@@ -1,51 +1,43 @@
 # DRiP Royale - Architecture & Functioning
 
-This document explains how DRiP Royale works, its architecture, data flow, and key components.
+This document explains how DRiP Royale works, its architecture, data flow, and key components—including **Campaign mode** (solo PvE runs, creator campaigns, and optional on-chain intents).
 
 ## 🏗️ System Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    DRiP Royale Frontend                      │
-│                   (React + TypeScript)                       │
-├─────────────────────────────────────────────────────────────┤
-│                                                               │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐       │
-│  │   Pages      │  │  Components  │  │    Hooks     │       │
-│  ├──────────────┤  ├──────────────┤  ├──────────────┤       │
-│  │ Home         │  │ TopBar       │  │ useGameState │       │
-│  │ VaultPage    │  │ Hero         │  │ useMatchmak. │       │
-│  │ ArenaPage    │  │ Vault        │  │ useHeliusAss.│       │
-│  │ ProfilePage  │  │ Arena        │  │ useLocalStor.│       │
-│  │ Leaderboard  │  │ Profile      │  │              │       │
-│  │ LedgerPage   │  │ Achievements │  │              │       │
-│  └──────────────┘  └──────────────┘  └──────────────┘       │
-│                                                               │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │              Game Logic & Utilities                  │   │
-│  ├──────────────────────────────────────────────────────┤   │
-│  │ warEngine.ts | aiStrategy.ts | localMatchEngine.ts  │   │
-│  │ helius.ts | websocket.ts | cardData.ts              │   │
-│  └──────────────────────────────────────────────────────┘   │
-│                                                               │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │         State Management & Contexts                 │   │
-│  ├──────────────────────────────────────────────────────┤   │
-│  │ DeckContext | DummyDeckContext | ThemeContext        │   │
-│  └──────────────────────────────────────────────────────┘   │
-│                                                               │
-└─────────────────────────────────────────────────────────────┘
-         │                    │                    │
-         ▼                    ▼                    ▼
-    ┌─────────────┐   ┌─────────────┐   ┌─────────────┐
-    │ localStorage│   │ Helius API  │   │ WebSocket   │
-    │  (Browser)  │   │ (Solana)    │   │ (Future)    │
-    └─────────────┘   └─────────────┘   └─────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│                     DRiP Royale Client (Vite + React)                │
+├──────────────────────────────────────────────────────────────────────┤
+│  Pages: Home, Vault, Arena, Profile, Ledger, Leaderboard, Docs        │
+│         Matchmaking (/matchmaking) · Campaigns (/campaigns)           │
+│         Creator dashboard (/creator)                                   │
+│  Lib: shared match engine client, Helius assets, soloCampaignClient,  │
+│       onchainCampaignTx (memo intents), websocket, campaignSession     │
+│  Contexts: Deck, DummyDeck, Phantom wallet, Theme                      │
+└──────────────────────────────────────────────────────────────────────┘
+         │ REST /api/*              │ Helius RPC           │ /ws/matchmaking
+         ▼                          ▼                      ▼
+┌─────────────────────┐    ┌─────────────────┐    ┌─────────────────────┐
+│ Express + HTTP      │    │ Solana (NFTs,   │    │ Matchmaking WS      │
+│ server/index.ts     │    │  txs via wallet)│    │ matchmaking-ws.ts   │
+├─────────────────────┤    └─────────────────┘    └─────────────────────┘
+│ /api/escrow         │
+│ /api/tokenomics     │
+│ /api/campaigns      │
+│ /api/users          │
+└──────────┬──────────┘
+           ▼
+    ┌──────────────┐     Static: dist/public (SPA) in production
+    │ PostgreSQL   │     Requires DATABASE_URL at server start
+    │ db-schema.sql│
+    └──────────────┘
 ```
+
+**Browser storage**: `localStorage` (profile, ledger, achievements) and `sessionStorage` (active campaign session, multiplayer session). Campaign mode also syncs runs and balances with the server.
 
 ## 🎮 Game Flow
 
-### 1. User Journey
+### 1. User Journey (Arena / Vault — classic flow)
 
 ```
 Home Page
@@ -56,9 +48,9 @@ Choose Demo Deck OR Connect Wallet
     ├─ Demo Mode: Select 5 demo cards
     └─ Wallet Mode: Load real NFTs from Helius
     ↓
-Select "THE ARENA"
+Select "THE ARENA" or Matchmaking
     ↓
-Choose Difficulty (Easy/Medium/Hard)
+Choose Difficulty (Easy/Medium/Hard) [Arena AI] or human opponent [matchmaking]
     ↓
 Play Match (Flip Cards Round by Round)
     ↓
@@ -68,6 +60,64 @@ Match Settlement (Victory/Defeat)
     ↓
 Return to Home or Play Again
 ```
+
+### 1b. Campaign mode journey (solo PvE)
+
+Campaigns are **staged runs**: four stages per run (`Match 1`, `Match 2`, `Match 3`, `Boss`). Each stage is a full flip battle using the shared `matchEngine`; the server generates a scaled opponent deck from the player’s deck, difficulty, and stage index.
+
+```
+/campaigns (SoloCampaignPage)
+    ↓
+Connect wallet · pick campaign · set difficulty (normal / hard / nightmare)
+    ↓
+Commit entry (ROYALE spend + optional on-chain memo tx if enabled)
+    → session: campaignSession (campaignId, difficulty, entryId)
+    ↓
+/vault — campaign mode ON (demo deck only for MVP fairness)
+    Build 2–52 cards, then continue
+    ↓
+/arena — startCampaignRun → server creates campaign_runs row + LocalMatch
+    ↓
+Per round: pickCampaignCard (server submitPick + AI resolves picks)
+    ↓
+stage_won → continueCampaignRun (next stage) | lost | completed
+    ↓
+Rewards: ROYALE + optional cNFT stage rewards (server mint path) + optional finalize/claim intents
+    ↓
+clearCampaignSession or return to /campaigns
+```
+
+**Key files**
+
+| Layer | Path | Role |
+|--------|------|------|
+| UI — list & pay | `client/src/pages/SoloCampaignPage.tsx` | Lists campaigns, entry preview, pays entry, writes `campaignSession` |
+| UI — play | `client/src/pages/ArenaPage.tsx` | Starts/continues run, picks cards, on-chain finalize/claim when enabled |
+| Session | `client/src/lib/campaignSession.ts` | `sessionStorage` bridge Vault ↔ Arena |
+| API client | `client/src/lib/soloCampaignClient.ts` | REST to `/api/campaigns/*` |
+| On-chain helper | `client/src/lib/onchainCampaignTx.ts` | Builds Phantom-signed tx: tiny SOL transfer + Memo with JSON intent |
+| Server router | `server/solo-campaign-routes.ts` | Campaigns, entries, runs, progress, rewards |
+| Tokenomics | `server/tokenomics-store.ts` + `/api/tokenomics` | ROYALE balance, challenge tickets, splits |
+| On-chain scaffolding | `server/onchain-campaign.ts` | PDAs, commitment hash, `ChainIntent` payloads |
+| DB | `server/db-schema.sql` | `campaign_*`, `creator_campaigns`, `token_wallets`, etc. |
+| Creator UI | `client/src/pages/CreatorDashboardPage.tsx` + `client/src/lib/usersClient.ts` | Draft/publish campaigns, collections, stage reward metadata |
+
+**Campaign catalog**: Published rows from `creator_campaigns` are merged with a small in-code seed list (`mvp-training`, `neon-citadel`, `void-gallery`) in `listAllCampaigns()`.
+
+**Entry economics**: Paid entries split ROYALE **50% creator / 35% reward pool / 15% protocol** (`ENTRY_SPLIT` in `solo-campaign-routes.ts`). Free or ticket-based paths exist where configured.
+
+### 1c. What campaign mode is for (product direction)
+
+| Today (implemented) | Where we’re going |
+|----------------------|-------------------|
+| Server-authoritative staged runs, persisted in Postgres | Same model, hardened anti-abuse and rate limits |
+| In-app **ROYALE** + challenge tickets | Deeper economy ties to seasons and matchmaking |
+| Creator-published campaigns + earnings tracking | Richer creator analytics and payout flows |
+| Stage reward definitions + cNFT mint integration | Broader reward types and secondary-market-friendly metadata |
+| **Memo-based “intents”** (publish, pay entry, finalize run, claim) for wallets | Replace with a **real Solana program** (Anchor) so PDAs vaults and settlement are enforced on-chain |
+| Run **commitment hash** (deck + run metadata) | Auditable verification against finalized outcomes |
+
+When `ONCHAIN_CAMPAIGNS_ENABLED=true` and a real `CAMPAIGN_PROGRAM_ID` is set, the same intent shape is intended to map to program instructions; until then, memos anchor intent in the user’s transaction history for integration testing.
 
 ### 2. Match Flow
 
@@ -183,32 +233,13 @@ const aiStrategy = createAIStrategy('hard');
 const selectedCard = aiStrategy.selectCard(gameState);
 ```
 
-### 3. Local Match Engine
+### 3. Match engine (shared + client wrapper)
 
-**Location**: `client/src/lib/localMatchEngine.ts`
+**Canonical logic**: `shared/matchEngine` — used by the **Express campaign router** (`initializeLocalMatch`, `submitPick`, etc.) and re-exported from the client.
 
-**Purpose**: Simulate card battles locally without server
+**Client wrapper**: `client/src/lib/localMatchEngine.ts` — classic Arena AI flow (`playRound`, `getWinnerInfo`, …) on top of the same types.
 
-**Functions**:
-- `initializeLocalMatch()`: Create new match
-- `playRound()`: Execute one round
-- `getMatchStats()`: Get current stats
-- `getWinnerInfo()`: Get match result
-
-**Flow**:
-```typescript
-// Initialize
-const match = initializeLocalMatch(playerDeck, opponentDeck, 'You', 'Opponent');
-
-// Play rounds
-while (match.isActive) {
-  const updatedMatch = playRound(match);
-  // Update UI with results
-}
-
-// Get winner
-const winnerInfo = getWinnerInfo(match);
-```
+**Campaign runs** never simulate full rounds only in the browser: the server holds the authoritative `LocalMatch` JSON in `campaign_runs.match_json` and advances it when the player calls `pickCampaignCard`.
 
 ### 4. Helius API Integration
 
@@ -244,6 +275,10 @@ const assets = await getAssetsByOwner(walletAddress);
 - `ledger`: Match history
 - `achievements`: Unlocked achievements
 
+**sessionStorage**:
+- `drip-campaign-session`: Active campaign id, difficulty, `entryId`, `runId` (see `campaignSession.ts`)
+- `drip-multiplayer`: Cleared when entering a campaign from Solo Campaign page
+
 ## 🔄 Data Flow
 
 ### 1. Vault Page Flow
@@ -257,11 +292,13 @@ Check localStorage for wallet
     ↓
 Display available cards
     ↓
-User selects 5-52 cards
+User selects 5-52 cards (wallet deck) or demo cards
+    ↓
+If campaign session active: demo-only deck, label "Campaign mode"
     ↓
 Store selection in DummyDeckContext
     ↓
-Navigate to Arena Page
+Navigate to Arena or Matchmaking (campaign → Arena)
 ```
 
 ### 2. Arena Page Flow
@@ -269,9 +306,10 @@ Navigate to Arena Page
 ```
 User enters Arena Page
     ↓
-Show DifficultySelector modal
+If `campaignSession`: skip classic difficulty modal; start or resume `startCampaignRun` / picks
+    Else: Show DifficultySelector modal
     ↓
-User selects difficulty
+User selects difficulty (non-campaign)
     ↓
 Initialize match with AI strategy
     ↓
@@ -412,28 +450,22 @@ User can:
 4. **State Management**: Minimal re-renders with React Context
 5. **API Caching**: localStorage for user data and NFT collections
 
-## 🔮 Future Enhancements
+## 🔮 Roadmap (current vs next)
 
-### Phase 1: Backend Integration
-- [ ] Node.js/Express server
-- [ ] WebSocket for real-time matchmaking
-- [ ] Database for persistent data
+**Shipped in this repo**
 
-### Phase 2: Smart Contracts
-- [ ] Solana Anchor program
-- [ ] On-chain settlement
-- [ ] NFT transfer logic
+- Express API: escrow, tokenomics, campaigns, users; static SPA in production.
+- PostgreSQL schema for wallets, campaigns, runs, creator content, chain-attestation tables.
+- WebSocket matchmaking server (`/ws/matchmaking`).
+- Campaign mode: staged PvE, ROYALE entry splits, creator dashboard, stage reward metadata + mint pipeline (see `server/campaign-reward-mint.ts`).
+- Optional memo-based on-chain intents for publish / entry / finalize / claim (`ONCHAIN_CAMPAIGNS_ENABLED`).
 
-### Phase 3: Multiplayer
-- [ ] Real opponent matching
-- [ ] Live match synchronization
-- [ ] Global leaderboard
+**Next**
 
-### Phase 4: Advanced Features
-- [ ] Seasonal rankings
-- [ ] Tournaments
-- [ ] Streaming integration
-- [ ] Mobile app
+- **Anchor program** replacing memo-only intents: vault PDAs, enforced entry and reward settlement.
+- **Multiplayer**: deepen escrow + WS sync; global leaderboard from persisted `match_history`.
+- **Campaign**: wallet-NFT deck support when fairness model is defined; stronger verification of commitments vs outcomes.
+- **Product**: seasons, tournaments, mobile polish.
 
 ## 📝 Development Guidelines
 
@@ -478,13 +510,14 @@ console.log('Debug:', data);
 // Check browser console (F12)
 ```
 
-### Check localStorage
+### Check localStorage / sessionStorage
 
 ```javascript
 // In browser console
 localStorage.getItem('userProfile')
 localStorage.getItem('ledger')
 localStorage.getItem('achievements')
+sessionStorage.getItem('drip-campaign-session')
 ```
 
 ### Monitor Network
@@ -505,5 +538,5 @@ localStorage.getItem('achievements')
 
 ---
 
-**Last Updated**: March 29, 2026
-**Version**: 1.0.0
+**Last Updated**: May 2, 2026  
+**Version**: 1.1.0 (backend + campaign mode documented)

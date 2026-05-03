@@ -12,7 +12,8 @@ export interface MatchmakingMessage {
     | 'match_end'
     | 'error'
     | 'rejoin_room'
-    | 'game_state';
+    | 'game_state'
+    | 'escrow_status';
   playerId: string;
   roomId?: string;
   deckSize?: number;
@@ -63,6 +64,20 @@ class MatchmakingService {
       this.url = `${base}?playerId=${encodeURIComponent(playerId)}`;
     }
   }
+
+//   const envWs = (import.meta.env.VITE_WS_URL as string | undefined)?.trim();
+
+//   if (wsUrl) {
+//     this.url = wsUrl;
+//   } else if (envWs) {
+//     const sep = envWs.includes("?") ? "&" : "?";
+//     this.url = `${envWs}${sep}playerId=${encodeURIComponent(playerId)}`;
+//   } else {
+//     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+//     const base = `${protocol}//${window.location.host}/ws/matchmaking`;
+//     this.url = `${base}?playerId=${encodeURIComponent(playerId)}`;
+//   }
+// }
 
   /**
    * Connect to WebSocket server
