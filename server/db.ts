@@ -1,6 +1,6 @@
 import { Pool, type QueryResultRow } from "pg";
 
-const DATABASE_URL = process.env.DATABASE_URL?.trim() || 'postgresql://neondb_owner:npg_WM2PEYhVyDo7@ep-wispy-mouse-an3p0aey-pooler.c-6.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require';
+const DATABASE_URL = process.env.DATABASE_URL?.trim() ;
 const DATABASE_SSL = process.env.DATABASE_SSL?.trim()?.toLowerCase();
 
 let pool: Pool | null = null;
