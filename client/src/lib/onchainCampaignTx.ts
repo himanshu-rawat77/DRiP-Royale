@@ -1,3 +1,4 @@
+import { Buffer } from "buffer";
 import { Connection, PublicKey, SystemProgram, Transaction, TransactionInstruction } from "@solana/web3.js";
 import { getHeliusRpcUrl } from "@shared/heliusRpc";
 import { getPhantomProvider } from "./phantomWallet";
