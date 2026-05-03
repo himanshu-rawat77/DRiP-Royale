@@ -188,3 +188,27 @@ create table if not exists campaign_run_rewards (
 
 create index if not exists idx_campaign_run_rewards_wallet
 on campaign_run_rewards(wallet, created_at desc);
+
+create table if not exists multiplayer_room_players (
+  room_id text not null,
+  player_id text not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  active boolean not null default true,
+  primary key (room_id, player_id)
+);
+
+create index if not exists idx_multiplayer_room_players_player
+on multiplayer_room_players(player_id, updated_at desc);
+
+create table if not exists multiplayer_escrow_ready (
+  room_id text not null,
+  player_id text not null,
+  wallet_address text not null,
+  ready_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  primary key (room_id, player_id)
+);
+
+create index if not exists idx_multiplayer_escrow_ready_room
+on multiplayer_escrow_ready(room_id, updated_at desc);
