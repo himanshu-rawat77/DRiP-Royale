@@ -1,5 +1,5 @@
 // server/index.ts
-import express4 from "express";
+import express5 from "express";
 import { createServer } from "http";
 import path2 from "path";
 import { fileURLToPath } from "url";
@@ -892,6 +892,40 @@ function createEscrowRouter() {
 // server/tokenomics-routes.ts
 import express2, { Router as Router2 } from "express";
 
+// server/db.ts
+import { Pool } from "pg";
+var DATABASE_URL = process.env.DATABASE_URL?.trim();
+var DATABASE_SSL = process.env.DATABASE_SSL?.trim()?.toLowerCase();
+var pool = null;
+function isSslEnabled() {
+  if (!DATABASE_SSL) return false;
+  return DATABASE_SSL === "true" || DATABASE_SSL === "1" || DATABASE_SSL === "require";
+}
+function getPool() {
+  if (!DATABASE_URL) {
+    throw new Error("DATABASE_URL is not configured");
+  }
+  if (!pool) {
+    pool = new Pool({
+      connectionString: DATABASE_URL,
+      ssl: isSslEnabled() ? { rejectUnauthorized: false } : void 0,
+      max: Number(process.env.DATABASE_POOL_MAX ?? 10)
+    });
+  }
+  return pool;
+}
+async function dbQuery(text, params = []) {
+  const p = getPool();
+  return p.query(text, params);
+}
+async function ensureDatabaseAvailable() {
+  const p = getPool();
+  await p.query("select 1");
+}
+function isDatabaseConfigured() {
+  return !!DATABASE_URL;
+}
+
 // server/tokenomics-store.ts
 var TOTAL_SUPPLY = 1e8;
 var DECIMALS = 0;
@@ -903,9 +937,6 @@ var ALLOCATIONS = {
   platformReserve: 30,
   liquidity: 20
 };
-var walletBalances = /* @__PURE__ */ new Map();
-var spendableTickets = /* @__PURE__ */ new Map();
-var starterDistributed = /* @__PURE__ */ new Set();
 function normalizeWallet(wallet) {
   return wallet.trim();
 }
@@ -927,50 +958,113 @@ function getTokenomicsConfig() {
     }
   };
 }
-function getRoyaleBalance(wallet) {
+async function getRoyaleBalance(wallet) {
   const key = normalizeWallet(wallet);
-  if (!starterDistributed.has(key)) {
-    starterDistributed.add(key);
-    walletBalances.set(key, STARTER_AIRDROP);
+  const upsert = await dbQuery(
+    `
+    insert into token_wallets (wallet, royale_balance, challenge_tickets, starter_distributed, updated_at)
+    values ($1, 0, 0, false, now())
+    on conflict (wallet) do update set updated_at = now()
+    returning royale_balance, starter_distributed
+    `,
+    [key]
+  );
+  const row = upsert.rows[0];
+  if (!row) return 0;
+  if (!row.starter_distributed) {
+    const seeded = await dbQuery(
+      `
+      update token_wallets
+      set royale_balance = royale_balance + $2,
+          starter_distributed = true,
+          updated_at = now()
+      where wallet = $1
+      returning royale_balance
+      `,
+      [key, STARTER_AIRDROP]
+    );
+    return seeded.rows[0]?.royale_balance ?? STARTER_AIRDROP;
   }
-  return walletBalances.get(key) ?? 0;
+  return row.royale_balance;
 }
-function distributeRoyale(wallet, amount) {
+async function distributeRoyale(wallet, amount) {
   const key = normalizeWallet(wallet);
-  const current = walletBalances.get(key) ?? 0;
-  const next = current + Math.max(0, Math.floor(amount));
-  walletBalances.set(key, next);
-  return { balance: next };
+  await getRoyaleBalance(key);
+  const out = await dbQuery(
+    `
+    update token_wallets
+    set royale_balance = royale_balance + $2,
+        updated_at = now()
+    where wallet = $1
+    returning royale_balance
+    `,
+    [key, Math.max(0, Math.floor(amount))]
+  );
+  return { balance: out.rows[0]?.royale_balance ?? 0 };
 }
-function spendRoyale(wallet, amount) {
+async function spendRoyale(wallet, amount) {
   const key = normalizeWallet(wallet);
-  const current = walletBalances.get(key) ?? 0;
+  const current = await getRoyaleBalance(key);
   const spend = Math.max(0, Math.floor(amount));
   if (current < spend) {
     return { ok: false, error: "Insufficient ROYALE balance" };
   }
-  const next = current - spend;
-  walletBalances.set(key, next);
-  return { ok: true, balance: next };
+  const out = await dbQuery(
+    `
+    update token_wallets
+    set royale_balance = royale_balance - $2,
+        updated_at = now()
+    where wallet = $1
+    returning royale_balance
+    `,
+    [key, spend]
+  );
+  return { ok: true, balance: out.rows[0]?.royale_balance ?? 0 };
 }
-function addChallengeTickets(wallet, count) {
+async function addChallengeTickets(wallet, count) {
   const key = normalizeWallet(wallet);
-  const current = spendableTickets.get(key) ?? 0;
-  const next = current + Math.max(0, Math.floor(count));
-  spendableTickets.set(key, next);
-  return next;
+  await getRoyaleBalance(key);
+  const out = await dbQuery(
+    `
+    update token_wallets
+    set challenge_tickets = challenge_tickets + $2,
+        updated_at = now()
+    where wallet = $1
+    returning challenge_tickets
+    `,
+    [key, Math.max(0, Math.floor(count))]
+  );
+  return out.rows[0]?.challenge_tickets ?? 0;
 }
-function consumeChallengeTicket(wallet) {
+async function consumeChallengeTicket(wallet) {
   const key = normalizeWallet(wallet);
-  const current = spendableTickets.get(key) ?? 0;
+  await getRoyaleBalance(key);
+  const currentOut = await dbQuery(
+    `select challenge_tickets from token_wallets where wallet = $1`,
+    [key]
+  );
+  const current = currentOut.rows[0]?.challenge_tickets ?? 0;
   if (current <= 0) return { ok: false, error: "No challenge tickets left" };
-  const next = current - 1;
-  spendableTickets.set(key, next);
-  return { ok: true, remaining: next };
+  const nextOut = await dbQuery(
+    `
+    update token_wallets
+    set challenge_tickets = challenge_tickets - 1,
+        updated_at = now()
+    where wallet = $1
+    returning challenge_tickets
+    `,
+    [key]
+  );
+  return { ok: true, remaining: nextOut.rows[0]?.challenge_tickets ?? 0 };
 }
-function getChallengeTickets(wallet) {
+async function getChallengeTickets(wallet) {
   const key = normalizeWallet(wallet);
-  return spendableTickets.get(key) ?? 0;
+  await getRoyaleBalance(key);
+  const out = await dbQuery(
+    `select challenge_tickets from token_wallets where wallet = $1`,
+    [key]
+  );
+  return out.rows[0]?.challenge_tickets ?? 0;
 }
 
 // server/tokenomics-routes.ts
@@ -994,7 +1088,7 @@ function createTokenomicsRouter() {
   r.get("/config", (_req, res) => {
     sendJson(res, 200, getTokenomicsConfig());
   });
-  r.get("/balance/:wallet", (req, res) => {
+  r.get("/balance/:wallet", async (req, res) => {
     const wallet = req.params.wallet;
     if (!wallet) {
       sendJson(res, 400, { error: "Missing wallet" });
@@ -1002,29 +1096,29 @@ function createTokenomicsRouter() {
     }
     sendJson(res, 200, {
       wallet,
-      royaleBalance: getRoyaleBalance(wallet),
-      challengeTickets: getChallengeTickets(wallet)
+      royaleBalance: await getRoyaleBalance(wallet),
+      challengeTickets: await getChallengeTickets(wallet)
     });
   });
-  r.post("/distribute", (req, res) => {
+  r.post("/distribute", async (req, res) => {
     const body = req.body;
     if (!body.wallet || typeof body.amount !== "number" || body.amount <= 0) {
       sendJson(res, 400, { error: "wallet and positive amount are required" });
       return;
     }
-    const out = distributeRoyale(body.wallet, body.amount);
+    const out = await distributeRoyale(body.wallet, body.amount);
     sendJson(res, 200, { ok: true, wallet: body.wallet, royaleBalance: out.balance });
   });
-  r.post("/airdrop", (req, res) => {
+  r.post("/airdrop", async (req, res) => {
     const body = req.body;
     if (!body.wallet) {
       sendJson(res, 400, { error: "wallet is required" });
       return;
     }
-    const out = distributeRoyale(body.wallet, 100);
+    const out = await distributeRoyale(body.wallet, 100);
     sendJson(res, 200, { ok: true, wallet: body.wallet, royaleBalance: out.balance, airdropped: 100 });
   });
-  r.post("/tickets/purchase", (req, res) => {
+  r.post("/tickets/purchase", async (req, res) => {
     const body = req.body;
     const wallet = body.wallet;
     const ticketCount = Math.max(1, Math.floor(body.ticketCount ?? 1));
@@ -1033,12 +1127,12 @@ function createTokenomicsRouter() {
       sendJson(res, 400, { error: "wallet is required" });
       return;
     }
-    const spendResult = spendRoyale(wallet, ticketCount * royaleCostPerTicket);
+    const spendResult = await spendRoyale(wallet, ticketCount * royaleCostPerTicket);
     if (!spendResult.ok) {
       sendJson(res, 400, { error: spendResult.error });
       return;
     }
-    const tickets = addChallengeTickets(wallet, ticketCount);
+    const tickets = await addChallengeTickets(wallet, ticketCount);
     sendJson(res, 200, {
       ok: true,
       royaleBalance: spendResult.balance,
@@ -1050,131 +1144,198 @@ function createTokenomicsRouter() {
 
 // server/solo-campaign-routes.ts
 import express3, { Router as Router3 } from "express";
-var campaigns = [
-  {
-    id: "mvp-training",
-    name: "MVP Training Grounds",
-    theme: "Simulation Sandbox",
-    creator: "DRiP System",
-    minDeckSize: 3,
-    rewardPool: 999,
-    baseRoyaleReward: 8,
-    entryTicketCost: 2,
-    prizePreview: "Training Relic cNFT"
-  },
-  {
-    id: "neon-citadel",
-    name: "Neon Citadel",
-    theme: "Cyber Landmark",
-    creator: "DRiP Creator Alpha",
-    minDeckSize: 5,
-    rewardPool: 120,
-    baseRoyaleReward: 12,
-    entryTicketCost: 5,
-    prizePreview: "Neon Crown (Rare cNFT)"
-  },
-  {
-    id: "void-gallery",
-    name: "Void Gallery",
-    theme: "Abstract Void",
-    creator: "DRiP Creator Sigma",
-    minDeckSize: 5,
-    rewardPool: 90,
-    baseRoyaleReward: 15,
-    entryTicketCost: 8,
-    prizePreview: "Void Curator Key (Epic cNFT)"
-  },
-  {
-    id: "drip-jungle-rush",
-    name: "Jungle Rush: Ape Protocol",
-    theme: "Primal Neon Jungle",
-    creator: "Ape Protocol",
-    minDeckSize: 4,
-    rewardPool: 74,
-    baseRoyaleReward: 18,
-    entryTicketCost: 6,
-    prizePreview: "Golden Canopy Totem (Rare cNFT)"
-  },
-  {
-    id: "sol-symphony",
-    name: "Sol Symphony Arena",
-    theme: "Audio-Reactive Metaverse Stage",
-    creator: "PulseForge",
-    minDeckSize: 6,
-    rewardPool: 52,
-    baseRoyaleReward: 22,
-    entryTicketCost: 10,
-    prizePreview: "Symphony Core Pass (Epic cNFT)"
-  },
-  {
-    id: "frost-byte-bastion",
-    name: "Frostbyte Bastion",
-    theme: "Cryo-Digital Fortress",
-    creator: "ByteWarden",
-    minDeckSize: 5,
-    rewardPool: 40,
-    baseRoyaleReward: 28,
-    entryTicketCost: 12,
-    prizePreview: "Glacial Cipher Sigil (Epic cNFT)"
-  },
-  {
-    id: "eclipse-catacomb",
-    name: "Eclipse Catacomb",
-    theme: "Shadow Relic Underworld",
-    creator: "Night Archive",
-    minDeckSize: 7,
-    rewardPool: 26,
-    baseRoyaleReward: 35,
-    entryTicketCost: 15,
-    prizePreview: "Umbral Archive Shard (Legendary cNFT)"
+
+// server/onchain-campaign.ts
+import crypto from "node:crypto";
+import { PublicKey } from "@solana/web3.js";
+var DEFAULT_PROGRAM_ID = "11111111111111111111111111111111";
+function getProgramId() {
+  const raw = process.env.CAMPAIGN_PROGRAM_ID?.trim() || DEFAULT_PROGRAM_ID;
+  try {
+    return new PublicKey(raw);
+  } catch {
+    return new PublicKey(DEFAULT_PROGRAM_ID);
   }
+}
+function derivePda(seed, campaignId, programId) {
+  const [pda] = PublicKey.findProgramAddressSync(
+    [Buffer.from(seed, "utf8"), Buffer.from(campaignId, "utf8")],
+    programId
+  );
+  return pda.toBase58();
+}
+function isOnchainCampaignsEnabled() {
+  return String(process.env.ONCHAIN_CAMPAIGNS_ENABLED || "").toLowerCase() === "true";
+}
+function deriveCampaignAccounts(campaignId) {
+  const programId = getProgramId();
+  return {
+    programId: programId.toBase58(),
+    campaignPda: derivePda("campaign", campaignId, programId),
+    rewardVaultPda: derivePda("reward-vault", campaignId, programId),
+    feeVaultPda: derivePda("fee-vault", campaignId, programId)
+  };
+}
+function buildMemo(action, payload) {
+  return JSON.stringify({
+    app: "drip-royale",
+    module: "campaigns",
+    action,
+    ts: Date.now(),
+    ...payload
+  });
+}
+function buildPublishIntent(input) {
+  const accounts = deriveCampaignAccounts(input.campaignId);
+  return {
+    mode: "onchain",
+    action: "publish_campaign",
+    ...accounts,
+    memo: buildMemo("publish_campaign", {
+      campaignId: input.campaignId,
+      creatorWallet: input.creatorWallet,
+      linkedCollectionMint: input.linkedCollectionMint ?? null
+    })
+  };
+}
+function buildEntryIntent(input) {
+  const accounts = deriveCampaignAccounts(input.campaignId);
+  return {
+    mode: "onchain",
+    action: "pay_entry",
+    ...accounts,
+    memo: buildMemo("pay_entry", {
+      campaignId: input.campaignId,
+      wallet: input.wallet,
+      amount: input.amount,
+      entryId: input.entryId
+    })
+  };
+}
+function createRunCommitmentHash(input) {
+  const nonce = Date.now();
+  const digest = crypto.createHash("sha256").update(
+    JSON.stringify({
+      runId: input.runId,
+      campaignId: input.campaignId,
+      wallet: input.wallet,
+      difficulty: input.difficulty,
+      deckAssetIds: [...input.deckAssetIds].sort(),
+      nonce
+    })
+  ).digest("hex");
+  return { commitmentHash: digest, nonce };
+}
+function buildFinalizeIntent(input) {
+  const accounts = deriveCampaignAccounts(input.campaignId);
+  return {
+    mode: "onchain",
+    action: "finalize_run",
+    ...accounts,
+    commitmentHash: input.commitmentHash,
+    nonce: input.nonce,
+    memo: buildMemo("finalize_run", input)
+  };
+}
+function buildClaimIntent(input) {
+  const accounts = deriveCampaignAccounts(input.campaignId);
+  return {
+    mode: "onchain",
+    action: "claim_reward",
+    ...accounts,
+    memo: buildMemo("claim_reward", input)
+  };
+}
+
+// server/campaign-reward-mint.ts
+import { publicKey as publicKey3 } from "@metaplex-foundation/umi";
+import { createUmi as createUmi3 } from "@metaplex-foundation/umi-bundle-defaults";
+import { signerIdentity as signerIdentity2, createSignerFromKeypair } from "@metaplex-foundation/umi";
+import { fromWeb3JsKeypair as fromWeb3JsKeypair3 } from "@metaplex-foundation/umi-web3js-adapters";
+import { mintToCollectionV1, mplBubblegum as mplBubblegum3 } from "@metaplex-foundation/mpl-bubblegum";
+import bs582 from "bs58";
+async function mintStageRewardCnft(input) {
+  const custody = getCustodyKeypair();
+  if (!custody) throw new Error("CUSTODY_PRIVATE_KEY is required for stage reward minting");
+  const umi = createUmi3(getServerHeliusRpcUrl()).use(mplBubblegum3());
+  const signer = createSignerFromKeypair(umi, fromWeb3JsKeypair3(custody));
+  umi.use(signerIdentity2(signer));
+  const merkleTreePk = publicKey3(input.merkleTree);
+  const collectionMintPk = publicKey3(input.collectionMint);
+  const creatorList = input.creators && input.creators.length > 0 ? input.creators.map((c) => ({
+    address: publicKey3(c.address),
+    verified: Boolean(c.verified),
+    share: c.share
+  })) : [{ address: signer.publicKey, verified: true, share: 100 }];
+  const mint = await mintToCollectionV1(umi, {
+    leafOwner: publicKey3(input.recipientWallet),
+    merkleTree: merkleTreePk,
+    collectionMint: collectionMintPk,
+    metadata: {
+      name: input.rewardName,
+      uri: input.metadataUri,
+      sellerFeeBasisPoints: 0,
+      collection: {
+        key: collectionMintPk,
+        verified: false
+      },
+      creators: creatorList
+    }
+  }).sendAndConfirm(umi);
+  return {
+    mintTx: bs582.encode(mint.signature),
+    mintedAssetId: `${merkleTreePk.toString()}:${mintTxShort(bs582.encode(mint.signature))}`
+  };
+}
+function mintTxShort(sig) {
+  return sig.slice(0, 16);
+}
+
+// server/solo-campaign-routes.ts
+var campaigns = [
+  { id: "mvp-training", name: "MVP Training Grounds", theme: "Simulation Sandbox", creator: "DRiP System", minDeckSize: 3, rewardPool: 999, baseRoyaleReward: 8, entryTicketCost: 2, prizePreview: "Training Relic cNFT" },
+  { id: "neon-citadel", name: "Neon Citadel", theme: "Cyber Landmark", creator: "DRiP Creator Alpha", minDeckSize: 5, rewardPool: 120, baseRoyaleReward: 12, entryTicketCost: 5, prizePreview: "Neon Crown (Rare cNFT)" },
+  { id: "void-gallery", name: "Void Gallery", theme: "Abstract Void", creator: "DRiP Creator Sigma", minDeckSize: 5, rewardPool: 90, baseRoyaleReward: 15, entryTicketCost: 8, prizePreview: "Void Curator Key (Epic cNFT)" }
 ];
-var playerProgress = /* @__PURE__ */ new Map();
-var runs = /* @__PURE__ */ new Map();
-var entries = /* @__PURE__ */ new Map();
-var creatorEarnings = /* @__PURE__ */ new Map();
-var campaignRoyaleFunds = /* @__PURE__ */ new Map();
+async function listAllCampaigns() {
+  const creatorRows = await dbQuery(
+    `select id, creator_wallet, name, theme, min_deck_size, reward_pool, base_royale_reward, entry_ticket_cost, prize_preview, status, config_json
+     from creator_campaigns
+     where status = 'published'
+     order by created_at desc`
+  );
+  const linkedIds = creatorRows.rows.map((row) => typeof row.config_json?.linkedCollectionId === "string" ? row.config_json.linkedCollectionId : null).filter((v) => !!v);
+  const collectionById = /* @__PURE__ */ new Map();
+  if (linkedIds.length > 0) {
+    const collections = await dbQuery(
+      `select id, name, metadata_json from creator_collections where id = any($1::text[])`,
+      [linkedIds]
+    );
+    collections.rows.forEach((row) => collectionById.set(row.id, row));
+  }
+  const creatorCampaigns = creatorRows.rows.map((row) => {
+    const linkedCollectionId = typeof row.config_json?.linkedCollectionId === "string" ? row.config_json.linkedCollectionId : void 0;
+    const linked = linkedCollectionId ? collectionById.get(linkedCollectionId) : void 0;
+    const linkedCollectionMint = linked && typeof linked.metadata_json?.collectionMint === "string" ? linked.metadata_json.collectionMint : null;
+    return {
+      id: row.id,
+      name: row.name,
+      theme: row.theme,
+      creator: row.creator_wallet,
+      minDeckSize: row.min_deck_size,
+      rewardPool: row.reward_pool,
+      baseRoyaleReward: row.base_royale_reward,
+      entryTicketCost: row.entry_ticket_cost,
+      prizePreview: row.prize_preview || `${row.reward_pool} cNFT pool`,
+      linkedCollectionId,
+      linkedCollectionName: linked?.name,
+      linkedCollectionMint
+    };
+  });
+  return [...campaigns, ...creatorCampaigns];
+}
 var STAGES = ["Match 1", "Match 2", "Match 3", "Boss"];
 var ENTRY_SPLIT = { creator: 50, rewardPool: 35, protocol: 15 };
-function splitEntry(amount) {
-  const creator = Math.floor(amount * ENTRY_SPLIT.creator / 100);
-  const rewardPool = Math.floor(amount * ENTRY_SPLIT.rewardPool / 100);
-  const protocol = Math.max(0, amount - creator - rewardPool);
-  return { creator, rewardPool, protocol };
-}
-function ensureCreatorEarnings(creator) {
-  const existing = creatorEarnings.get(creator);
-  if (existing) return existing;
-  const next = { creator, totalRoyale: 0, byCampaign: {} };
-  creatorEarnings.set(creator, next);
-  return next;
-}
-function ensureCampaignFunds(campaignId) {
-  const existing = campaignRoyaleFunds.get(campaignId);
-  if (existing) return existing;
-  const next = { rewardPoolRoyale: 0, protocolRoyale: 0 };
-  campaignRoyaleFunds.set(campaignId, next);
-  return next;
-}
-function progressFor(wallet, campaignId) {
-  let byCampaign = playerProgress.get(wallet);
-  if (!byCampaign) {
-    byCampaign = /* @__PURE__ */ new Map();
-    playerProgress.set(wallet, byCampaign);
-  }
-  let p = byCampaign.get(campaignId);
-  if (!p) {
-    p = {
-      completedChapters: 0,
-      wins: 0,
-      losses: 0,
-      bestDifficulty: null,
-      claimedRewards: 0
-    };
-    byCampaign.set(campaignId, p);
-  }
-  return p;
-}
 function difficultyScale(difficulty) {
   if (difficulty === "hard") return 1.2;
   if (difficulty === "nightmare") return 1.45;
@@ -1233,25 +1394,11 @@ function pickHighest(deck) {
   if (deck.length === 0) return null;
   return [...deck].sort((a, b) => b.power - a.power)[0] ?? null;
 }
-function runResponse(run, campaign) {
-  return {
-    ok: true,
-    runId: run.runId,
-    campaign: {
-      id: campaign.id,
-      name: campaign.name,
-      rewardPool: campaign.rewardPool
-    },
-    status: run.status,
-    stageIndex: run.stageIndex,
-    stageLabel: STAGES[run.stageIndex] ?? STAGES[3],
-    match: run.match,
-    prompt: run.prompt,
-    royaleReward: run.royaleReward,
-    rewardGranted: run.rewardGranted,
-    royaleBalance: getRoyaleBalance(run.wallet),
-    challengeTickets: getChallengeTickets(run.wallet)
-  };
+function splitEntry(amount) {
+  const creator = Math.floor(amount * ENTRY_SPLIT.creator / 100);
+  const rewardPool = Math.floor(amount * ENTRY_SPLIT.rewardPool / 100);
+  const protocol = Math.max(0, amount - creator - rewardPool);
+  return { creator, rewardPool, protocol };
 }
 function initializeStageMatch(run) {
   const opponentDeck = opponentDeckFromPlayer(run.deck, run.difficulty, run.stageIndex);
@@ -1266,212 +1413,384 @@ function resolveAIPicks(match) {
   }
   return next;
 }
-function updateProgressOnStageResult(run, campaign) {
-  const progress = progressFor(run.wallet, campaign.id);
+async function upsertProgress(wallet, campaignId, progress) {
+  await dbQuery(
+    `
+    insert into campaign_progress (wallet, campaign_id, completed_chapters, wins, losses, best_difficulty, claimed_rewards, updated_at)
+    values ($1,$2,$3,$4,$5,$6,$7,now())
+    on conflict (wallet, campaign_id)
+    do update set completed_chapters=$3, wins=$4, losses=$5, best_difficulty=$6, claimed_rewards=$7, updated_at=now()
+    `,
+    [wallet, campaignId, progress.completedChapters, progress.wins, progress.losses, progress.bestDifficulty, progress.claimedRewards]
+  );
+}
+async function getProgress(wallet, campaignId) {
+  const out = await dbQuery(`select * from campaign_progress where wallet=$1 and campaign_id=$2`, [wallet, campaignId]);
+  const row = out.rows[0];
+  if (!row) {
+    return { completedChapters: 0, wins: 0, losses: 0, bestDifficulty: null, claimedRewards: 0 };
+  }
+  return {
+    completedChapters: row.completed_chapters,
+    wins: row.wins,
+    losses: row.losses,
+    bestDifficulty: row.best_difficulty,
+    claimedRewards: row.claimed_rewards
+  };
+}
+async function saveRun(run) {
+  await dbQuery(
+    `
+    insert into campaign_runs (run_id, wallet, campaign_id, difficulty, stage_index, status, prompt, all_flawless, reward_granted, royale_reward, deck_json, match_json, updated_at)
+    values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12::jsonb,now())
+    on conflict (run_id)
+    do update set stage_index=$5,status=$6,prompt=$7,all_flawless=$8,reward_granted=$9,royale_reward=$10,deck_json=$11::jsonb,match_json=$12::jsonb,updated_at=now()
+    `,
+    [
+      run.runId,
+      run.wallet,
+      run.campaignId,
+      run.difficulty,
+      run.stageIndex,
+      run.status,
+      run.prompt,
+      run.allFlawless,
+      run.rewardGranted,
+      run.royaleReward,
+      JSON.stringify(run.deck),
+      JSON.stringify(run.match)
+    ]
+  );
+}
+async function getRun(runId) {
+  const out = await dbQuery(`select * from campaign_runs where run_id=$1`, [runId]);
+  const row = out.rows[0];
+  if (!row) return null;
+  return {
+    runId: row.run_id,
+    wallet: row.wallet,
+    campaignId: row.campaign_id,
+    difficulty: row.difficulty,
+    stageIndex: row.stage_index,
+    status: row.status,
+    prompt: row.prompt,
+    allFlawless: row.all_flawless,
+    rewardGranted: row.reward_granted,
+    royaleReward: row.royale_reward,
+    deck: row.deck_json ?? [],
+    match: row.match_json ?? null
+  };
+}
+async function removeRun(runId) {
+  await dbQuery(`delete from campaign_runs where run_id=$1`, [runId]);
+}
+async function getRunChainState(runId) {
+  const out = await dbQuery(
+    `select run_id, commitment_hash, nonce::text, status, finalize_signature, claim_signature
+     from campaign_run_chain where run_id = $1`,
+    [runId]
+  );
+  return out.rows[0] ?? null;
+}
+async function getCampaignChainState(campaignId) {
+  const out = await dbQuery(
+    `select campaign_id, chain_mode, program_id, campaign_pda, reward_vault_pda, fee_vault_pda, publish_signature, status
+     from campaign_chain_state where campaign_id = $1`,
+    [campaignId]
+  );
+  return out.rows[0] ?? null;
+}
+async function runResponse(run, campaign) {
+  const chainRun = await getRunChainState(run.runId);
+  const chainCampaign = await getCampaignChainState(campaign.id);
+  const rewardsOut = await dbQuery(
+    `
+    select stage_index, reward_name, metadata_uri, mint_tx, minted_asset_id, created_at
+    from campaign_run_rewards
+    where run_id = $1
+    order by stage_index asc
+    `,
+    [run.runId]
+  );
+  return {
+    ok: true,
+    runId: run.runId,
+    campaign: { id: campaign.id, name: campaign.name, rewardPool: campaign.rewardPool },
+    status: run.status,
+    stageIndex: run.stageIndex,
+    stageLabel: STAGES[run.stageIndex] ?? STAGES[3],
+    match: run.match,
+    prompt: run.prompt,
+    royaleReward: run.royaleReward,
+    rewardGranted: run.rewardGranted,
+    royaleBalance: await getRoyaleBalance(run.wallet),
+    challengeTickets: await getChallengeTickets(run.wallet),
+    onchain: {
+      enabled: isOnchainCampaignsEnabled(),
+      chainMode: chainCampaign?.chain_mode ?? "offchain",
+      campaignStatus: chainCampaign?.status ?? "draft",
+      runStatus: chainRun?.status ?? null,
+      finalizedSignature: chainRun?.finalize_signature ?? null,
+      claimSignature: chainRun?.claim_signature ?? null
+    },
+    mintedRewards: rewardsOut.rows.map((r) => ({
+      stageIndex: r.stage_index,
+      rewardName: r.reward_name,
+      metadataUri: r.metadata_uri,
+      mintTx: r.mint_tx,
+      mintedAssetId: r.minted_asset_id,
+      createdAt: r.created_at
+    }))
+  };
+}
+async function updateProgressOnStageResult(run, campaign) {
   if (!run.match || run.match.isActive) return;
+  const progress = await getProgress(run.wallet, campaign.id);
   const stageFlawless = run.match.roundResults.every((r) => r.winner !== "player2");
   run.allFlawless = run.allFlawless && stageFlawless;
   if (run.match.winner === "player1") {
+    await mintStageRewardForStageWin(run, campaign, run.stageIndex);
     progress.completedChapters += 1;
     if (run.stageIndex >= 3) {
       progress.wins += 1;
       progress.bestDifficulty = difficultyRank(run.difficulty) > difficultyRank(progress.bestDifficulty) ? run.difficulty : progress.bestDifficulty;
       const base = Math.floor(campaign.baseRoyaleReward * difficultyScale(run.difficulty));
       run.royaleReward = run.allFlawless ? base + 3 : base;
-      distributeRoyale(run.wallet, run.royaleReward);
+      await distributeRoyale(run.wallet, run.royaleReward);
       run.rewardGranted = campaign.rewardPool > 0;
-      if (run.rewardGranted) {
-        campaign.rewardPool -= 1;
-        progress.claimedRewards += 1;
-      }
-      if (run.allFlawless) addChallengeTickets(run.wallet, 1);
+      if (run.rewardGranted) progress.claimedRewards += 1;
+      if (run.allFlawless) await addChallengeTickets(run.wallet, 1);
       run.status = "completed";
       run.prompt = "Boss defeated. Campaign cleared.";
-      return;
+    } else {
+      run.status = "stage_won";
+      run.prompt = `${STAGES[run.stageIndex]} cleared. Continue to next match.`;
     }
-    run.status = "stage_won";
-    run.prompt = `${STAGES[run.stageIndex]} cleared. Continue to next match.`;
+  } else {
+    progress.losses += 1;
+    run.status = "lost";
+    run.prompt = `Defeated at ${STAGES[run.stageIndex]}. Return to campaign page.`;
+  }
+  await upsertProgress(run.wallet, campaign.id, progress);
+}
+async function mintStageRewardForStageWin(run, campaign, stageIndex) {
+  if (!campaign.id.startsWith("creator-")) return;
+  const existing = await dbQuery(
+    `select id from campaign_run_rewards where run_id = $1 and stage_index = $2`,
+    [run.runId, stageIndex]
+  );
+  if (existing.rows[0]) return;
+  const stageCfg = await dbQuery(
+    `
+    select reward_name, metadata_uri, status
+    from campaign_stage_rewards
+    where campaign_id = $1 and stage_index = $2
+    `,
+    [campaign.id, stageIndex]
+  );
+  const reward = stageCfg.rows[0];
+  if (!reward || reward.status !== "active") return;
+  const collection = await dbQuery(
+    `
+    select cc.metadata_json
+    from creator_campaigns cp
+    join creator_collections cc on cc.id = (cp.config_json->>'linkedCollectionId')
+    where cp.id = $1
+    `,
+    [campaign.id]
+  );
+  const metadataJson = collection.rows[0]?.metadata_json;
+  const collectionMint = metadataJson && typeof metadataJson.collectionMint === "string" ? metadataJson.collectionMint : null;
+  const merkleTree = metadataJson && typeof metadataJson.merkleTree === "string" ? metadataJson.merkleTree : null;
+  if (!collectionMint || !merkleTree) {
+    console.warn(`[campaign] missing collectionMint/merkleTree for campaign ${campaign.id}, skipping stage mint`);
     return;
   }
-  progress.losses += 1;
-  run.status = "lost";
-  run.prompt = `Defeated at ${STAGES[run.stageIndex]}. Return to campaign page.`;
+  try {
+    const minted = await mintStageRewardCnft({
+      recipientWallet: run.wallet,
+      collectionMint,
+      merkleTree,
+      rewardName: reward.reward_name,
+      metadataUri: reward.metadata_uri,
+      creators: [{ address: campaign.creator, verified: false, share: 100 }]
+    });
+    await dbQuery(
+      `
+      insert into campaign_run_rewards (
+        run_id, campaign_id, wallet, stage_index, reward_name, metadata_uri, mint_tx, minted_asset_id, created_at
+      )
+      values ($1,$2,$3,$4,$5,$6,$7,$8,now())
+      on conflict (run_id, stage_index) do nothing
+      `,
+      [run.runId, campaign.id, run.wallet, stageIndex, reward.reward_name, reward.metadata_uri, minted.mintTx, minted.mintedAssetId]
+    );
+  } catch (e) {
+    console.error(`[campaign] stage reward mint failed for run ${run.runId} stage ${stageIndex}`, e);
+  }
 }
 function createSoloCampaignRouter() {
   const r = Router3();
   r.use(express3.json({ limit: "512kb" }));
   const sendJson = (res, status, payload) => {
-    if (typeof res?.status === "function" && typeof res?.json === "function") {
-      res.status(status).json(payload);
-      return;
-    }
+    if (typeof res?.status === "function" && typeof res?.json === "function") return res.status(status).json(payload);
     if (typeof res?.writeHead === "function") {
       res.writeHead(status, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(payload));
-      return;
+      return res.end(JSON.stringify(payload));
     }
     res.statusCode = status;
     if (typeof res?.setHeader === "function") res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify(payload));
+    return res.end(JSON.stringify(payload));
   };
-  r.get("/", (_req, res) => {
-    sendJson(res, 200, { campaigns });
+  r.get("/", async (_req, res) => {
+    const allCampaigns = await listAllCampaigns();
+    return sendJson(res, 200, { campaigns: allCampaigns });
   });
-  r.get("/creators/:creator/earnings", (req, res) => {
+  r.get("/creators/:creator/earnings", async (req, res) => {
     const creator = decodeURIComponent(req.params.creator || "").trim();
-    if (!creator) {
-      sendJson(res, 400, { error: "creator is required" });
-      return;
-    }
-    const out = ensureCreatorEarnings(creator);
-    sendJson(res, 200, out);
+    if (!creator) return sendJson(res, 400, { error: "creator is required" });
+    const out = await dbQuery(
+      `select total_royale, by_campaign from creator_earnings where creator = $1`,
+      [creator]
+    );
+    const row = out.rows[0] ?? { total_royale: 0, by_campaign: {} };
+    return sendJson(res, 200, { creator, totalRoyale: row.total_royale, byCampaign: row.by_campaign });
   });
-  r.get("/progress/:wallet", (req, res) => {
+  r.get("/progress/:wallet", async (req, res) => {
     const wallet = req.params.wallet;
-    const byCampaign = playerProgress.get(wallet);
-    const progress = campaigns.map((campaign) => ({
-      campaignId: campaign.id,
-      ...byCampaign?.get(campaign.id) ?? {
-        completedChapters: 0,
-        wins: 0,
-        losses: 0,
-        bestDifficulty: null,
-        claimedRewards: 0
-      }
-    }));
-    sendJson(res, 200, {
+    const rows = await dbQuery(`select * from campaign_progress where wallet = $1`, [wallet]);
+    const byCampaign = new Map(rows.rows.map((r2) => [r2.campaign_id, r2]));
+    const allCampaigns = await listAllCampaigns();
+    const progress = allCampaigns.map((campaign) => {
+      const row = byCampaign.get(campaign.id);
+      return {
+        campaignId: campaign.id,
+        completedChapters: row?.completed_chapters ?? 0,
+        wins: row?.wins ?? 0,
+        losses: row?.losses ?? 0,
+        bestDifficulty: row?.best_difficulty ?? null,
+        claimedRewards: row?.claimed_rewards ?? 0
+      };
+    });
+    return sendJson(res, 200, {
       wallet,
       progress,
-      royaleBalance: getRoyaleBalance(wallet),
-      challengeTickets: getChallengeTickets(wallet)
+      royaleBalance: await getRoyaleBalance(wallet),
+      challengeTickets: await getChallengeTickets(wallet)
     });
   });
-  r.post("/:campaignId/deposit", (req, res) => {
-    const campaign = campaigns.find((c) => c.id === req.params.campaignId);
-    if (!campaign) {
-      sendJson(res, 404, { error: "Campaign not found" });
-      return;
+  r.post("/:campaignId/deposit", async (req, res) => {
+    const allCampaigns = await listAllCampaigns();
+    const campaign = allCampaigns.find((c) => c.id === req.params.campaignId);
+    if (!campaign) return sendJson(res, 404, { error: "Campaign not found" });
+    const rewardCount = Math.max(1, Math.floor(req.body.rewardCount ?? 1));
+    if (campaign.id.startsWith("creator-")) {
+      const out = await dbQuery(
+        `update creator_campaigns set reward_pool = reward_pool + $2, updated_at = now() where id = $1 returning reward_pool`,
+        [campaign.id, rewardCount]
+      );
+      return sendJson(res, 200, { ok: true, campaignId: campaign.id, rewardPool: out.rows[0]?.reward_pool ?? campaign.rewardPool });
     }
-    const body = req.body;
-    const rewardCount = Math.max(1, Math.floor(body.rewardCount ?? 1));
     campaign.rewardPool += rewardCount;
-    sendJson(res, 200, { ok: true, campaignId: campaign.id, rewardPool: campaign.rewardPool });
+    return sendJson(res, 200, { ok: true, campaignId: campaign.id, rewardPool: campaign.rewardPool });
   });
-  r.post("/:campaignId/entry/preview", (req, res) => {
-    const campaign = campaigns.find((c) => c.id === req.params.campaignId);
-    if (!campaign) {
-      sendJson(res, 404, { error: "Campaign not found" });
-      return;
-    }
+  r.post("/:campaignId/entry/preview", async (req, res) => {
+    const allCampaigns = await listAllCampaigns();
+    const campaign = allCampaigns.find((c) => c.id === req.params.campaignId);
+    if (!campaign) return sendJson(res, 404, { error: "Campaign not found" });
     const amount = Math.max(0, Math.floor(campaign.entryTicketCost));
     const split = splitEntry(amount);
     const wallet = req.body?.walletAddress?.trim();
-    sendJson(res, 200, {
+    const balance = wallet ? await getRoyaleBalance(wallet) : void 0;
+    return sendJson(res, 200, {
       campaignId: campaign.id,
       amount,
       split,
       splitPct: ENTRY_SPLIT,
-      royaleBalance: wallet ? getRoyaleBalance(wallet) : void 0,
-      canAfford: wallet ? getRoyaleBalance(wallet) >= amount : void 0
+      royaleBalance: balance,
+      canAfford: wallet ? (balance ?? 0) >= amount : void 0
     });
   });
-  r.post("/:campaignId/entry/commit", (req, res) => {
-    const campaign = campaigns.find((c) => c.id === req.params.campaignId);
-    if (!campaign) {
-      sendJson(res, 404, { error: "Campaign not found" });
-      return;
-    }
-    const body = req.body;
-    const wallet = body.walletAddress?.trim();
-    if (!wallet) {
-      sendJson(res, 400, { error: "walletAddress is required" });
-      return;
-    }
+  r.post("/:campaignId/entry/commit", async (req, res) => {
+    const allCampaigns = await listAllCampaigns();
+    const campaign = allCampaigns.find((c) => c.id === req.params.campaignId);
+    if (!campaign) return sendJson(res, 404, { error: "Campaign not found" });
+    const wallet = req.body.walletAddress?.trim();
+    if (!wallet) return sendJson(res, 400, { error: "walletAddress is required" });
     const amount = Math.max(0, Math.floor(campaign.entryTicketCost));
     const split = splitEntry(amount);
     if (amount > 0) {
-      const spent = spendRoyale(wallet, amount);
-      if (!spent.ok) {
-        sendJson(res, 400, { error: spent.error });
-        return;
-      }
+      const spent = await spendRoyale(wallet, amount);
+      if (!spent.ok) return sendJson(res, 400, { error: spent.error });
     }
-    const creatorBook = ensureCreatorEarnings(campaign.creator);
-    creatorBook.totalRoyale += split.creator;
-    creatorBook.byCampaign[campaign.id] = (creatorBook.byCampaign[campaign.id] ?? 0) + split.creator;
-    const funds = ensureCampaignFunds(campaign.id);
-    funds.rewardPoolRoyale += split.rewardPool;
-    funds.protocolRoyale += split.protocol;
+    await dbQuery(
+      `
+      insert into creator_earnings (creator, total_royale, by_campaign, updated_at)
+      values ($1, $2::int, jsonb_build_object($3::text, $2::int), now())
+      on conflict (creator)
+      do update set total_royale = creator_earnings.total_royale + $2,
+                   by_campaign = creator_earnings.by_campaign || jsonb_build_object($3::text, coalesce((creator_earnings.by_campaign->>($3::text))::int, 0) + $2::int),
+                   updated_at = now()
+      `,
+      [campaign.creator, split.creator, campaign.id]
+    );
+    await dbQuery(
+      `
+      insert into campaign_funds (campaign_id, reward_pool_royale, protocol_royale, updated_at)
+      values ($1,$2,$3,now())
+      on conflict (campaign_id)
+      do update set reward_pool_royale = campaign_funds.reward_pool_royale + $2,
+                   protocol_royale = campaign_funds.protocol_royale + $3,
+                   updated_at = now()
+      `,
+      [campaign.id, split.rewardPool, split.protocol]
+    );
     const entryId = `entry-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const record = {
-      entryId,
-      wallet,
+    await dbQuery(
+      `insert into campaign_entries (entry_id,wallet,campaign_id,amount,split_json,status,created_at) values ($1,$2,$3,$4,$5::jsonb,'committed',now())`,
+      [entryId, wallet, campaign.id, amount, JSON.stringify(split)]
+    );
+    const chainIntent = isOnchainCampaignsEnabled() && campaign.id.startsWith("creator-") ? buildEntryIntent({
       campaignId: campaign.id,
+      wallet,
       amount,
-      split,
-      status: "committed",
-      createdAt: Date.now()
-    };
-    entries.set(entryId, record);
-    sendJson(res, 200, {
+      entryId
+    }) : null;
+    return sendJson(res, 200, {
       ok: true,
       entryId,
       campaignId: campaign.id,
       amount,
       split,
-      royaleBalance: getRoyaleBalance(wallet),
-      challengeTickets: getChallengeTickets(wallet),
-      creatorTotalRoyale: creatorBook.totalRoyale,
-      campaignFunds: funds
+      royaleBalance: await getRoyaleBalance(wallet),
+      challengeTickets: await getChallengeTickets(wallet),
+      onchain: chainIntent
     });
   });
-  r.post("/:campaignId/runs/start", (req, res) => {
-    const campaign = campaigns.find((c) => c.id === req.params.campaignId);
-    if (!campaign) {
-      sendJson(res, 404, { error: "Campaign not found" });
-      return;
-    }
+  r.post("/:campaignId/runs/start", async (req, res) => {
+    const allCampaigns = await listAllCampaigns();
+    const campaign = allCampaigns.find((c) => c.id === req.params.campaignId);
+    if (!campaign) return sendJson(res, 404, { error: "Campaign not found" });
     const body = req.body;
     const wallet = body.walletAddress?.trim();
-    if (!wallet) {
-      sendJson(res, 400, { error: "walletAddress is required" });
-      return;
-    }
+    if (!wallet) return sendJson(res, 400, { error: "walletAddress is required" });
     const deck = Array.isArray(body.deck) ? body.deck : [];
-    if (deck.length < campaign.minDeckSize) {
-      sendJson(res, 400, { error: `Minimum deck size is ${campaign.minDeckSize}` });
-      return;
-    }
+    if (deck.length < campaign.minDeckSize) return sendJson(res, 400, { error: `Minimum deck size is ${campaign.minDeckSize}` });
     const difficulty = body.difficulty === "hard" || body.difficulty === "nightmare" ? body.difficulty : "normal";
     const entryCost = Math.max(0, Math.floor(campaign.entryTicketCost));
     if (entryCost > 0) {
       const entryId = body.entryId?.trim();
-      if (!entryId) {
-        sendJson(res, 400, { error: "entryId is required for this campaign" });
-        return;
-      }
-      const entry = entries.get(entryId);
-      if (!entry) {
-        sendJson(res, 400, { error: "Invalid entryId" });
-        return;
-      }
-      if (entry.status !== "committed") {
-        sendJson(res, 400, { error: "Entry already consumed" });
-        return;
-      }
-      if (entry.wallet !== wallet || entry.campaignId !== campaign.id) {
-        sendJson(res, 403, { error: "entryId does not belong to this wallet/campaign" });
-        return;
-      }
-      entry.status = "consumed";
-      entries.set(entryId, entry);
+      if (!entryId) return sendJson(res, 400, { error: "entryId is required for this campaign" });
+      const entry = await dbQuery(`select wallet, campaign_id, status from campaign_entries where entry_id=$1`, [entryId]);
+      const row = entry.rows[0];
+      if (!row) return sendJson(res, 400, { error: "Invalid entryId" });
+      if (row.status !== "committed") return sendJson(res, 400, { error: "Entry already consumed" });
+      if (row.wallet !== wallet || row.campaign_id !== campaign.id) return sendJson(res, 403, { error: "entryId does not belong to this wallet/campaign" });
+      await dbQuery(`update campaign_entries set status='consumed' where entry_id=$1`, [entryId]);
     }
     if (body.useTicket) {
-      const spent = consumeChallengeTicket(wallet);
-      if (!spent.ok) {
-        sendJson(res, 400, { error: spent.error });
-        return;
-      }
+      const spent = await consumeChallengeTicket(wallet);
+      if (!spent.ok) return sendJson(res, 400, { error: spent.error });
     }
     const runId = `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const run = {
@@ -1489,100 +1808,806 @@ function createSoloCampaignRouter() {
       royaleReward: 0
     };
     run.match = resolveAIPicks(initializeStageMatch(run));
-    runs.set(runId, run);
-    if (body.entryId) {
-      const e = entries.get(body.entryId);
-      if (e && e.status === "consumed") {
-        e.runId = runId;
-        entries.set(body.entryId, e);
-      }
+    await saveRun(run);
+    if (isOnchainCampaignsEnabled() && campaign.id.startsWith("creator-")) {
+      const { commitmentHash, nonce } = createRunCommitmentHash({
+        runId,
+        campaignId: campaign.id,
+        wallet,
+        difficulty,
+        deckAssetIds: run.deck.map((d) => d.assetId)
+      });
+      await dbQuery(
+        `
+        insert into campaign_run_chain (run_id, wallet, campaign_id, commitment_hash, nonce, status, updated_at)
+        values ($1,$2,$3,$4,$5,'committed',now())
+        on conflict (run_id)
+        do update set commitment_hash=$4, nonce=$5, status='committed', updated_at=now()
+        `,
+        [runId, wallet, campaign.id, commitmentHash, nonce]
+      );
     }
-    sendJson(res, 200, runResponse(run, campaign));
+    if (body.entryId) await dbQuery(`update campaign_entries set run_id=$2 where entry_id=$1`, [body.entryId, runId]);
+    return sendJson(res, 200, await runResponse(run, campaign));
   });
-  r.get("/runs/:runId", (req, res) => {
-    const run = runs.get(req.params.runId);
-    if (!run) {
-      sendJson(res, 404, { error: "Run not found" });
-      return;
-    }
-    const campaign = campaigns.find((c) => c.id === run.campaignId);
-    if (!campaign) {
-      sendJson(res, 404, { error: "Campaign not found" });
-      return;
-    }
-    sendJson(res, 200, runResponse(run, campaign));
+  r.post("/:campaignId/onchain/publish-intent", async (req, res) => {
+    const allCampaigns = await listAllCampaigns();
+    const campaign = allCampaigns.find((c) => c.id === req.params.campaignId);
+    if (!campaign) return sendJson(res, 404, { error: "Campaign not found" });
+    const creatorWallet = req.body?.creatorWallet?.trim();
+    if (!creatorWallet) return sendJson(res, 400, { error: "creatorWallet is required" });
+    const intent = buildPublishIntent({
+      campaignId: campaign.id,
+      creatorWallet,
+      linkedCollectionMint: campaign.linkedCollectionMint ?? null
+    });
+    await dbQuery(
+      `
+      insert into campaign_chain_state (
+        campaign_id, chain_mode, program_id, campaign_pda, reward_vault_pda, fee_vault_pda, status, updated_at
+      )
+      values ($1,'onchain',$2,$3,$4,$5,'published',now())
+      on conflict (campaign_id)
+      do update set chain_mode='onchain', program_id=$2, campaign_pda=$3, reward_vault_pda=$4, fee_vault_pda=$5, status='published', updated_at=now()
+      `,
+      [campaign.id, intent.programId, intent.campaignPda, intent.rewardVaultPda, intent.feeVaultPda]
+    );
+    return sendJson(res, 200, { ok: true, intent });
   });
-  r.post("/runs/:runId/pick", (req, res) => {
-    const run = runs.get(req.params.runId);
-    if (!run) {
-      sendJson(res, 404, { error: "Run not found" });
-      return;
-    }
-    const campaign = campaigns.find((c) => c.id === run.campaignId);
-    if (!campaign) {
-      sendJson(res, 404, { error: "Campaign not found" });
-      return;
-    }
+  r.post("/:campaignId/onchain/publish-confirm", async (req, res) => {
+    const campaignId = req.params.campaignId;
     const body = req.body;
-    if (!body.walletAddress || body.walletAddress !== run.wallet) {
-      sendJson(res, 403, { error: "wallet mismatch" });
-      return;
+    if (!body.creatorWallet?.trim() || !body.signature?.trim()) {
+      return sendJson(res, 400, { error: "creatorWallet and signature are required" });
     }
-    if (!body.assetId) {
-      sendJson(res, 400, { error: "assetId is required" });
-      return;
+    await dbQuery(
+      `
+      update campaign_chain_state
+      set publish_signature = $2, status = 'published', updated_at = now()
+      where campaign_id = $1
+      `,
+      [campaignId, body.signature.trim()]
+    );
+    return sendJson(res, 200, { ok: true, status: "published", signature: body.signature.trim() });
+  });
+  r.post("/entries/:entryId/onchain/confirm", async (req, res) => {
+    const entryId = req.params.entryId;
+    const body = req.body;
+    if (!body.walletAddress?.trim() || !body.signature?.trim()) {
+      return sendJson(res, 400, { error: "walletAddress and signature are required" });
     }
-    if (run.status !== "in_progress" || !run.match) {
-      sendJson(res, 400, { error: "Run is not in an active match state" });
-      return;
+    const entry = await dbQuery(
+      `select wallet, campaign_id from campaign_entries where entry_id = $1`,
+      [entryId]
+    );
+    const row = entry.rows[0];
+    if (!row) return sendJson(res, 404, { error: "Entry not found" });
+    if (row.wallet !== body.walletAddress.trim()) return sendJson(res, 403, { error: "wallet mismatch" });
+    await dbQuery(
+      `
+      insert into campaign_entry_chain (entry_id, wallet, campaign_id, status, pay_signature, updated_at)
+      values ($1,$2,$3,'paid',$4,now())
+      on conflict (entry_id)
+      do update set status='paid', pay_signature=$4, updated_at=now()
+      `,
+      [entryId, row.wallet, row.campaign_id, body.signature.trim()]
+    );
+    return sendJson(res, 200, { ok: true, status: "paid", signature: body.signature.trim() });
+  });
+  r.post("/runs/:runId/onchain/finalize-intent", async (req, res) => {
+    const run = await getRun(req.params.runId);
+    if (!run) return sendJson(res, 404, { error: "Run not found" });
+    const allCampaigns = await listAllCampaigns();
+    const campaign = allCampaigns.find((c) => c.id === run.campaignId);
+    if (!campaign) return sendJson(res, 404, { error: "Campaign not found" });
+    const body = req.body;
+    if (!body.walletAddress || body.walletAddress !== run.wallet) return sendJson(res, 403, { error: "wallet mismatch" });
+    const chain = await getRunChainState(run.runId);
+    if (!chain) return sendJson(res, 400, { error: "Run commitment missing. Start run again." });
+    const intent = buildFinalizeIntent({
+      campaignId: campaign.id,
+      runId: run.runId,
+      wallet: run.wallet,
+      commitmentHash: chain.commitment_hash,
+      nonce: Number(chain.nonce)
+    });
+    await dbQuery(
+      `update campaign_run_chain set status='finalize_pending', finalize_signature=coalesce($2, finalize_signature), updated_at=now() where run_id=$1`,
+      [run.runId, body.chainSignature?.trim() || null]
+    );
+    return sendJson(res, 200, { ok: true, intent });
+  });
+  r.post("/runs/:runId/onchain/claim-intent", async (req, res) => {
+    const run = await getRun(req.params.runId);
+    if (!run) return sendJson(res, 404, { error: "Run not found" });
+    const allCampaigns = await listAllCampaigns();
+    const campaign = allCampaigns.find((c) => c.id === run.campaignId);
+    if (!campaign) return sendJson(res, 404, { error: "Campaign not found" });
+    const body = req.body;
+    if (!body.walletAddress || body.walletAddress !== run.wallet) return sendJson(res, 403, { error: "wallet mismatch" });
+    if (run.status !== "completed") return sendJson(res, 400, { error: "Run not completed" });
+    const intent = buildClaimIntent({
+      campaignId: campaign.id,
+      runId: run.runId,
+      wallet: run.wallet,
+      rewardType: campaign.linkedCollectionMint ? "hybrid" : "royale"
+    });
+    await dbQuery(
+      `update campaign_run_chain set status='claim_pending', claim_signature=coalesce($2, claim_signature), updated_at=now() where run_id=$1`,
+      [run.runId, body.chainSignature?.trim() || null]
+    );
+    return sendJson(res, 200, { ok: true, intent });
+  });
+  r.post("/runs/:runId/onchain/confirm", async (req, res) => {
+    const run = await getRun(req.params.runId);
+    if (!run) return sendJson(res, 404, { error: "Run not found" });
+    const body = req.body;
+    if (!body.walletAddress || body.walletAddress !== run.wallet) return sendJson(res, 403, { error: "wallet mismatch" });
+    if (!body.stage || !body.signature?.trim()) return sendJson(res, 400, { error: "stage and signature are required" });
+    if (body.stage === "finalize") {
+      await dbQuery(
+        `update campaign_run_chain set status='finalized', finalize_signature=$2, updated_at=now() where run_id=$1`,
+        [run.runId, body.signature.trim()]
+      );
+      return sendJson(res, 200, { ok: true, status: "finalized" });
     }
+    await dbQuery(
+      `update campaign_run_chain set status='claimed', claim_signature=$2, updated_at=now() where run_id=$1`,
+      [run.runId, body.signature.trim()]
+    );
+    return sendJson(res, 200, { ok: true, status: "claimed" });
+  });
+  r.get("/runs/:runId", async (req, res) => {
+    const run = await getRun(req.params.runId);
+    if (!run) return sendJson(res, 404, { error: "Run not found" });
+    const allCampaigns = await listAllCampaigns();
+    const campaign = allCampaigns.find((c) => c.id === run.campaignId);
+    if (!campaign) return sendJson(res, 404, { error: "Campaign not found" });
+    return sendJson(res, 200, await runResponse(run, campaign));
+  });
+  r.post("/runs/:runId/pick", async (req, res) => {
+    const run = await getRun(req.params.runId);
+    if (!run) return sendJson(res, 404, { error: "Run not found" });
+    const allCampaigns = await listAllCampaigns();
+    const campaign = allCampaigns.find((c) => c.id === run.campaignId);
+    if (!campaign) return sendJson(res, 404, { error: "Campaign not found" });
+    const body = req.body;
+    if (!body.walletAddress || body.walletAddress !== run.wallet) return sendJson(res, 403, { error: "wallet mismatch" });
+    if (!body.assetId) return sendJson(res, 400, { error: "assetId is required" });
+    if (run.status !== "in_progress" || !run.match) return sendJson(res, 400, { error: "Run is not in an active match state" });
     let next = submitPick(run.match, "player1", body.assetId);
     next = resolveAIPicks(next);
     run.match = next;
-    if (!run.match.isActive) {
-      updateProgressOnStageResult(run, campaign);
-    }
-    sendJson(res, 200, runResponse(run, campaign));
+    if (!run.match.isActive) await updateProgressOnStageResult(run, campaign);
+    await saveRun(run);
+    return sendJson(res, 200, await runResponse(run, campaign));
   });
-  r.post("/runs/:runId/next", (req, res) => {
-    const run = runs.get(req.params.runId);
-    if (!run) {
-      sendJson(res, 404, { error: "Run not found" });
-      return;
-    }
-    const campaign = campaigns.find((c) => c.id === run.campaignId);
-    if (!campaign) {
-      sendJson(res, 404, { error: "Campaign not found" });
-      return;
-    }
+  r.post("/runs/:runId/next", async (req, res) => {
+    const run = await getRun(req.params.runId);
+    if (!run) return sendJson(res, 404, { error: "Run not found" });
+    const allCampaigns = await listAllCampaigns();
+    const campaign = allCampaigns.find((c) => c.id === run.campaignId);
+    if (!campaign) return sendJson(res, 404, { error: "Campaign not found" });
     const body = req.body;
-    if (!body.walletAddress || body.walletAddress !== run.wallet) {
-      sendJson(res, 403, { error: "wallet mismatch" });
-      return;
-    }
-    if (run.status !== "stage_won") {
-      sendJson(res, 400, { error: "Next stage unavailable for current run state" });
-      return;
-    }
+    if (!body.walletAddress || body.walletAddress !== run.wallet) return sendJson(res, 403, { error: "wallet mismatch" });
+    if (run.status !== "stage_won") return sendJson(res, 400, { error: "Next stage unavailable for current run state" });
     run.stageIndex = Math.min(3, run.stageIndex + 1);
     run.status = "in_progress";
     run.prompt = null;
     run.match = resolveAIPicks(initializeStageMatch(run));
-    sendJson(res, 200, runResponse(run, campaign));
+    await saveRun(run);
+    return sendJson(res, 200, await runResponse(run, campaign));
   });
-  r.post("/runs/:runId/exit", (req, res) => {
-    const run = runs.get(req.params.runId);
-    if (!run) {
-      sendJson(res, 404, { error: "Run not found" });
-      return;
-    }
+  r.post("/runs/:runId/exit", async (req, res) => {
+    const run = await getRun(req.params.runId);
+    if (!run) return sendJson(res, 404, { error: "Run not found" });
     const body = req.body;
-    if (!body.walletAddress || body.walletAddress !== run.wallet) {
-      sendJson(res, 403, { error: "wallet mismatch" });
+    if (!body.walletAddress || body.walletAddress !== run.wallet) return sendJson(res, 403, { error: "wallet mismatch" });
+    await removeRun(run.runId);
+    return sendJson(res, 200, { ok: true });
+  });
+  return r;
+}
+
+// server/users-routes.ts
+import express4, { Router as Router4 } from "express";
+import { nanoid as nanoid2 } from "nanoid";
+
+// server/campaign-collection-bootstrap.ts
+import { createUmi as createUmi4 } from "@metaplex-foundation/umi-bundle-defaults";
+import { createNft, mplTokenMetadata } from "@metaplex-foundation/mpl-token-metadata";
+import { createTree, mplBubblegum as mplBubblegum4 } from "@metaplex-foundation/mpl-bubblegum";
+import { generateSigner, signerIdentity as signerIdentity3, percentAmount, createSignerFromKeypair as createSignerFromKeypair2 } from "@metaplex-foundation/umi";
+import { fromWeb3JsKeypair as fromWeb3JsKeypair4 } from "@metaplex-foundation/umi-web3js-adapters";
+import { Connection, LAMPORTS_PER_SOL } from "@solana/web3.js";
+import bs583 from "bs58";
+async function bootstrapCollectionNft(input) {
+  const custody = getCustodyKeypair();
+  if (!custody) throw new Error("CUSTODY_PRIVATE_KEY is required to create collection");
+  const umi = createUmi4(getServerHeliusRpcUrl()).use(mplTokenMetadata());
+  const signer = createSignerFromKeypair2(umi, fromWeb3JsKeypair4(custody));
+  umi.use(signerIdentity3(signer));
+  await ensureSignerCanPay(custody.publicKey.toBase58(), getServerHeliusRpcUrl());
+  const collectionMint = generateSigner(umi);
+  const tx = await createNft(umi, {
+    mint: collectionMint,
+    symbol: input.symbol?.trim() || "DRIP",
+    name: input.name.trim(),
+    uri: input.metadataUri.trim(),
+    sellerFeeBasisPoints: percentAmount(Math.max(0, Math.min(10, input.sellerFeePercent ?? 0))),
+    isCollection: true
+  }).sendAndConfirm(umi);
+  return {
+    collectionMint: collectionMint.publicKey.toString(),
+    txSignature: bs583.encode(tx.signature)
+  };
+}
+async function bootstrapMerkleTree(input) {
+  const custody = getCustodyKeypair();
+  if (!custody) throw new Error("CUSTODY_PRIVATE_KEY is required to create merkle tree");
+  const umi = createUmi4(getServerHeliusRpcUrl()).use(mplBubblegum4());
+  const signer = createSignerFromKeypair2(umi, fromWeb3JsKeypair4(custody));
+  umi.use(signerIdentity3(signer));
+  await ensureSignerCanPay(custody.publicKey.toBase58(), getServerHeliusRpcUrl());
+  const merkleTree = generateSigner(umi);
+  const builder = await createTree(umi, {
+    merkleTree,
+    maxDepth: input?.maxDepth ?? 14,
+    maxBufferSize: input?.maxBufferSize ?? 64
+  });
+  const tx = await builder.sendAndConfirm(umi);
+  return {
+    merkleTree: merkleTree.publicKey.toString(),
+    txSignature: bs583.encode(tx.signature)
+  };
+}
+async function ensureSignerCanPay(wallet, rpcUrl) {
+  const conn = new Connection(rpcUrl, "confirmed");
+  const lamports = await conn.getBalance(new (await import("@solana/web3.js")).PublicKey(wallet), "confirmed");
+  if (lamports > 1e-3 * LAMPORTS_PER_SOL) return;
+  const network = String(
+    process.env.SOLANA_NETWORK || process.env.NEXT_PUBLIC_SOLANA_NETWORK || process.env.VITE_SOLANA_NETWORK || "devnet"
+  ).toLowerCase();
+  if (network === "devnet") {
+    try {
+      const sig = await conn.requestAirdrop(
+        new (await import("@solana/web3.js")).PublicKey(wallet),
+        0.05 * LAMPORTS_PER_SOL
+      );
+      await conn.confirmTransaction(sig, "confirmed");
+      const after = await conn.getBalance(new (await import("@solana/web3.js")).PublicKey(wallet), "confirmed");
+      if (after > 0) return;
+    } catch {
+    }
+  }
+  throw new Error(
+    `[campaign-bootstrap] Signer wallet ${wallet} has insufficient SOL for fees on ${network}. Fund this wallet and retry.`
+  );
+}
+
+// server/users-routes.ts
+function normalizeWallet2(wallet) {
+  return (wallet ?? "").trim();
+}
+function readQueryLimit(req, fallback) {
+  const expressLimit = req?.query?.limit;
+  if (expressLimit !== void 0) {
+    const parsed = Number(expressLimit);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  }
+  const rawUrl = typeof req?.url === "string" ? req.url : "";
+  if (!rawUrl) return fallback;
+  try {
+    const url = new URL(rawUrl, "http://localhost");
+    const fromUrl = Number(url.searchParams.get("limit") ?? fallback);
+    return Number.isFinite(fromUrl) ? fromUrl : fallback;
+  } catch {
+    return fallback;
+  }
+}
+function createUsersRouter() {
+  const r = Router4();
+  r.use(express4.json({ limit: "256kb" }));
+  const sendJson = (res, status, payload) => {
+    if (typeof res?.status === "function" && typeof res?.json === "function") {
+      res.status(status).json(payload);
       return;
     }
-    runs.delete(run.runId);
-    sendJson(res, 200, { ok: true });
+    if (typeof res?.writeHead === "function") {
+      res.writeHead(status, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(payload));
+      return;
+    }
+    res.statusCode = status;
+    if (typeof res?.setHeader === "function") res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify(payload));
+  };
+  r.get("/:wallet", async (req, res) => {
+    const wallet = normalizeWallet2(req.params.wallet);
+    if (!wallet) return sendJson(res, 400, { error: "wallet is required" });
+    const out = await dbQuery(
+      `select wallet, role, username from users where wallet = $1`,
+      [wallet]
+    );
+    const row = out.rows[0] ?? null;
+    return sendJson(res, 200, {
+      wallet,
+      role: row?.role ?? null,
+      username: row?.username ?? null,
+      isNew: !row
+    });
+  });
+  r.post("/:wallet/role", async (req, res) => {
+    const wallet = normalizeWallet2(req.params.wallet);
+    const body = req.body;
+    if (!wallet) return sendJson(res, 400, { error: "wallet is required" });
+    if (body.role !== "player" && body.role !== "creator") {
+      return sendJson(res, 400, { error: "role must be player or creator" });
+    }
+    const username = body.username?.trim() || null;
+    const out = await dbQuery(
+      `
+      insert into users (wallet, role, username, created_at, updated_at)
+      values ($1, $2, $3, now(), now())
+      on conflict (wallet)
+      do update set role = excluded.role,
+                    username = coalesce(excluded.username, users.username),
+                    updated_at = now()
+      returning wallet, role, username
+      `,
+      [wallet, body.role, username]
+    );
+    return sendJson(res, 200, { ok: true, ...out.rows[0] });
+  });
+  r.get("/:wallet/history", async (req, res) => {
+    const wallet = normalizeWallet2(req.params.wallet);
+    const limitRaw = readQueryLimit(req, 50);
+    const limit = Math.max(1, Math.min(200, Number.isFinite(limitRaw) ? limitRaw : 50));
+    if (!wallet) return sendJson(res, 400, { error: "wallet is required" });
+    const out = await dbQuery(
+      `
+      select id, external_match_id, opponent, result, reward, nfts_won, mode, created_at
+      from match_history
+      where wallet = $1
+      order by created_at desc
+      limit $2
+      `,
+      [wallet, limit]
+    );
+    const entries = out.rows.map((row) => ({
+      id: `match-${row.id}`,
+      externalMatchId: row.external_match_id,
+      opponent: row.opponent,
+      result: row.result,
+      reward: row.reward,
+      nftsWon: row.nfts_won ?? [],
+      mode: row.mode,
+      date: new Date(row.created_at).toLocaleString(),
+      createdAt: row.created_at
+    }));
+    const wins = entries.filter((e) => e.result === "WIN").length;
+    const losses = entries.filter((e) => e.result === "LOSS").length;
+    const total = wins + losses;
+    const winRate = total > 0 ? Number((wins / total * 100).toFixed(1)) : 0;
+    return sendJson(res, 200, { wallet, entries, stats: { wins, losses, total, winRate } });
+  });
+  r.post("/matches", async (req, res) => {
+    const body = req.body;
+    const wallet = normalizeWallet2(body.wallet);
+    if (!wallet) return sendJson(res, 400, { error: "wallet is required" });
+    if (body.result !== "WIN" && body.result !== "LOSS") {
+      return sendJson(res, 400, { error: "result must be WIN or LOSS" });
+    }
+    const opponent = (body.opponent ?? "Opponent").trim();
+    const reward = (body.reward ?? "N/A").trim();
+    const nftsWon = Array.isArray(body.nftsWon) ? body.nftsWon : [];
+    const mode = (body.mode ?? "multiplayer").trim();
+    await dbQuery(
+      `
+      insert into match_history (wallet, external_match_id, opponent, result, reward, nfts_won, mode, created_at)
+      values ($1, $2, $3, $4, $5, $6::jsonb, $7, now())
+      on conflict (wallet, external_match_id) where external_match_id is not null do nothing
+      `,
+      [wallet, body.externalMatchId ?? null, opponent, body.result, reward, JSON.stringify(nftsWon), mode]
+    );
+    return sendJson(res, 200, { ok: true });
+  });
+  r.get("/creator/:wallet/dashboard", async (req, res) => {
+    const wallet = normalizeWallet2(req.params.wallet);
+    if (!wallet) return sendJson(res, 400, { error: "wallet is required" });
+    const campaignsOut = await dbQuery(
+      `select count(*)::text as count from creator_campaigns where creator_wallet = $1`,
+      [wallet]
+    );
+    const collectionsOut = await dbQuery(
+      `select count(*)::text as count from creator_collections where creator_wallet = $1`,
+      [wallet]
+    );
+    const earningsOut = await dbQuery(
+      `select total_royale, by_campaign from creator_earnings where creator = $1`,
+      [wallet]
+    );
+    const earnings = earningsOut.rows[0] ?? { total_royale: 0, by_campaign: {} };
+    return sendJson(res, 200, {
+      wallet,
+      stats: {
+        campaigns: Number(campaignsOut.rows[0]?.count ?? 0),
+        collections: Number(collectionsOut.rows[0]?.count ?? 0),
+        totalEarnings: earnings.total_royale
+      },
+      byCampaign: earnings.by_campaign ?? {}
+    });
+  });
+  r.get("/creator/:wallet/campaigns", async (req, res) => {
+    const wallet = normalizeWallet2(req.params.wallet);
+    if (!wallet) return sendJson(res, 400, { error: "wallet is required" });
+    const out = await dbQuery(
+      `select * from creator_campaigns where creator_wallet = $1 order by created_at desc`,
+      [wallet]
+    );
+    return sendJson(res, 200, { campaigns: out.rows });
+  });
+  r.post("/creator/:wallet/campaigns", async (req, res) => {
+    const wallet = normalizeWallet2(req.params.wallet);
+    if (!wallet) return sendJson(res, 400, { error: "wallet is required" });
+    const body = req.body;
+    const name = body.name?.trim();
+    const theme = body.theme?.trim();
+    if (!name || !theme) return sendJson(res, 400, { error: "name and theme are required" });
+    const linkedCollectionId = body.linkedCollectionId?.trim() || void 0;
+    if (linkedCollectionId) {
+      const linked = await dbQuery(
+        `select id from creator_collections where id = $1 and creator_wallet = $2`,
+        [linkedCollectionId, wallet]
+      );
+      if (!linked.rows[0]) return sendJson(res, 400, { error: "linkedCollectionId not found for this creator" });
+    }
+    const mergedConfig = {
+      ...body.config ?? {},
+      ...linkedCollectionId ? { linkedCollectionId } : {}
+    };
+    const id = `creator-${nanoid2(10)}`;
+    await dbQuery(
+      `
+      insert into creator_campaigns (
+        id, creator_wallet, name, theme, min_deck_size, entry_ticket_cost, reward_pool, base_royale_reward,
+        prize_preview, status, config_json, created_at, updated_at
+      )
+      values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,now(),now())
+      `,
+      [
+        id,
+        wallet,
+        name,
+        theme,
+        Math.max(3, Math.floor(body.minDeckSize ?? 5)),
+        Math.max(0, Math.floor(body.entryTicketCost ?? 5)),
+        Math.max(0, Math.floor(body.rewardPool ?? 0)),
+        Math.max(1, Math.floor(body.baseRoyaleReward ?? 10)),
+        (body.prizePreview ?? "").trim(),
+        (body.status ?? "draft").trim(),
+        JSON.stringify(mergedConfig)
+      ]
+    );
+    return sendJson(res, 200, { ok: true, id });
+  });
+  r.get("/creator/:wallet/collections", async (req, res) => {
+    const wallet = normalizeWallet2(req.params.wallet);
+    if (!wallet) return sendJson(res, 400, { error: "wallet is required" });
+    const out = await dbQuery(
+      `select * from creator_collections where creator_wallet = $1 order by created_at desc`,
+      [wallet]
+    );
+    return sendJson(res, 200, { collections: out.rows });
+  });
+  r.post("/creator/:wallet/collections", async (req, res) => {
+    const wallet = normalizeWallet2(req.params.wallet);
+    if (!wallet) return sendJson(res, 400, { error: "wallet is required" });
+    const body = req.body;
+    const name = body.name?.trim();
+    if (!name) return sendJson(res, 400, { error: "name is required" });
+    const metadata = {
+      ...body.metadata ?? {},
+      imageUri: body.imageUri?.trim() || null,
+      externalUrl: body.externalUrl?.trim() || null,
+      collectionMetadataUri: body.collectionMetadataUri?.trim() || null,
+      feePercent: typeof body.feePercent === "number" ? body.feePercent : null,
+      collectionMint: body.collectionMint?.trim() || null,
+      mintingRules: body.mintingRules ?? null,
+      metadataTemplate: body.metadataTemplate ?? null,
+      verificationSignerRef: body.verificationSignerRef?.trim() || null,
+      merkleTree: body.merkleTree?.trim() || null,
+      chainStatus: body.collectionMint ? "configured" : "draft"
+    };
+    const id = `collection-${nanoid2(10)}`;
+    await dbQuery(
+      `
+      insert into creator_collections (
+        id, creator_wallet, name, symbol, description, supply, status, metadata_json, created_at, updated_at
+      )
+      values ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,now(),now())
+      `,
+      [
+        id,
+        wallet,
+        name,
+        body.symbol?.trim() || null,
+        body.description?.trim() || null,
+        Math.max(0, Math.floor(body.supply ?? 0)),
+        (body.status ?? "draft").trim(),
+        JSON.stringify(metadata)
+      ]
+    );
+    return sendJson(res, 200, { ok: true, id });
+  });
+  r.post("/creator/:wallet/collections/:collectionId/mint/prepare", async (req, res) => {
+    const wallet = normalizeWallet2(req.params.wallet);
+    const collectionId = req.params.collectionId?.trim();
+    if (!wallet || !collectionId) return sendJson(res, 400, { error: "wallet and collectionId are required" });
+    const collectionOut = await dbQuery(
+      `select id, name, metadata_json from creator_collections where id = $1 and creator_wallet = $2`,
+      [collectionId, wallet]
+    );
+    const collection = collectionOut.rows[0];
+    if (!collection) return sendJson(res, 404, { error: "Collection not found" });
+    const body = req.body;
+    if (!body.recipientWallet?.trim()) return sendJson(res, 400, { error: "recipientWallet is required" });
+    return sendJson(res, 200, {
+      ok: true,
+      type: "prepared_mint_request",
+      collectionId: collection.id,
+      collectionName: collection.name,
+      recipientWallet: body.recipientWallet.trim(),
+      payload: {
+        itemName: body.itemName?.trim() || "Campaign Reward NFT",
+        itemUri: body.itemUri?.trim() || "",
+        attributes: body.attributes ?? []
+      },
+      notes: [
+        "This endpoint prepares mint intent for server signer flow.",
+        "Next integration: execute mint + collection verification with backend signer."
+      ]
+    });
+  });
+  r.post("/creator/:wallet/collections/:collectionId/bootstrap/collection", async (req, res) => {
+    const wallet = normalizeWallet2(req.params.wallet);
+    const collectionId = req.params.collectionId?.trim();
+    if (!wallet || !collectionId) return sendJson(res, 400, { error: "wallet and collectionId are required" });
+    const out = await dbQuery(
+      `select id, name, symbol, metadata_json from creator_collections where id = $1 and creator_wallet = $2`,
+      [collectionId, wallet]
+    );
+    const row = out.rows[0];
+    if (!row) return sendJson(res, 404, { error: "Collection not found" });
+    const body = req.body;
+    const metadataUri = body.metadataUri?.trim() || typeof row.metadata_json?.collectionMetadataUri === "string" && row.metadata_json.collectionMetadataUri.trim() || typeof row.metadata_json?.metadataUri === "string" && row.metadata_json.metadataUri.trim() || null;
+    if (!metadataUri) {
+      return sendJson(res, 400, {
+        error: "metadata uri missing. Set collectionMetadataUri/metadataUri in collection metadata first."
+      });
+    }
+    const minted = await bootstrapCollectionNft({
+      name: body.name?.trim() || row.name,
+      symbol: body.symbol?.trim() || row.symbol,
+      metadataUri,
+      sellerFeePercent: body.feePercent ?? 0
+    });
+    const nextMetadata = {
+      ...row.metadata_json ?? {},
+      collectionMetadataUri: metadataUri,
+      imageUri: body.imageUri?.trim() || row.metadata_json?.imageUri || null,
+      externalUrl: body.externalUrl?.trim() || row.metadata_json?.externalUrl || null,
+      description: body.description?.trim() || row.metadata_json?.description || null,
+      collectionMint: minted.collectionMint,
+      collectionCreateTx: minted.txSignature,
+      chainStatus: "collection_created"
+    };
+    await dbQuery(
+      `update creator_collections set metadata_json = $2::jsonb, updated_at = now() where id = $1`,
+      [collectionId, JSON.stringify(nextMetadata)]
+    );
+    return sendJson(res, 200, { ok: true, collectionMint: minted.collectionMint, txSignature: minted.txSignature });
+  });
+  r.post("/creator/:wallet/collections/:collectionId/bootstrap/merkle", async (req, res) => {
+    const wallet = normalizeWallet2(req.params.wallet);
+    const collectionId = req.params.collectionId?.trim();
+    if (!wallet || !collectionId) return sendJson(res, 400, { error: "wallet and collectionId are required" });
+    const out = await dbQuery(
+      `select id, metadata_json from creator_collections where id = $1 and creator_wallet = $2`,
+      [collectionId, wallet]
+    );
+    const row = out.rows[0];
+    if (!row) return sendJson(res, 404, { error: "Collection not found" });
+    const body = req.body;
+    const created = await bootstrapMerkleTree({
+      maxDepth: body.maxDepth,
+      maxBufferSize: body.maxBufferSize
+    });
+    const nextMetadata = {
+      ...row.metadata_json ?? {},
+      merkleTree: created.merkleTree,
+      merkleCreateTx: created.txSignature,
+      chainStatus: "merkle_created"
+    };
+    await dbQuery(
+      `update creator_collections set metadata_json = $2::jsonb, updated_at = now() where id = $1`,
+      [collectionId, JSON.stringify(nextMetadata)]
+    );
+    return sendJson(res, 200, { ok: true, merkleTree: created.merkleTree, txSignature: created.txSignature });
+  });
+  r.get("/creator/:wallet/campaigns/:campaignId/stage-rewards", async (req, res) => {
+    const wallet = normalizeWallet2(req.params.wallet);
+    const campaignId = req.params.campaignId?.trim();
+    if (!wallet || !campaignId) return sendJson(res, 400, { error: "wallet and campaignId are required" });
+    const own = await dbQuery(
+      `select id from creator_campaigns where id = $1 and creator_wallet = $2`,
+      [campaignId, wallet]
+    );
+    if (!own.rows[0]) return sendJson(res, 404, { error: "Campaign not found for this creator" });
+    const out = await dbQuery(
+      `
+      select stage_index, reward_name, metadata_uri, image_uri, rarity, supply_cap, status
+      from campaign_stage_rewards
+      where campaign_id = $1
+      order by stage_index asc
+      `,
+      [campaignId]
+    );
+    return sendJson(res, 200, { campaignId, rewards: out.rows });
+  });
+  r.post("/creator/:wallet/campaigns/:campaignId/stage-rewards", async (req, res) => {
+    const wallet = normalizeWallet2(req.params.wallet);
+    const campaignId = req.params.campaignId?.trim();
+    if (!wallet || !campaignId) return sendJson(res, 400, { error: "wallet and campaignId are required" });
+    const own = await dbQuery(
+      `select id from creator_campaigns where id = $1 and creator_wallet = $2`,
+      [campaignId, wallet]
+    );
+    if (!own.rows[0]) return sendJson(res, 404, { error: "Campaign not found for this creator" });
+    const body = req.body;
+    const rewards = Array.isArray(body.rewards) ? body.rewards : [];
+    if (rewards.length === 0) return sendJson(res, 400, { error: "rewards are required" });
+    for (const rwd of rewards) {
+      const stageIndex = Math.max(0, Math.min(3, Math.floor(rwd.stageIndex)));
+      const rewardName = (rwd.rewardName ?? "").trim();
+      const metadataUri = (rwd.metadataUri ?? "").trim();
+      if (!rewardName || !metadataUri) {
+        return sendJson(res, 400, { error: "rewardName and metadataUri are required for each stage" });
+      }
+      await dbQuery(
+        `
+        insert into campaign_stage_rewards (
+          campaign_id, stage_index, reward_name, metadata_uri, image_uri, rarity, supply_cap, status, updated_at
+        )
+        values ($1,$2,$3,$4,$5,$6,$7,$8,now())
+        on conflict (campaign_id, stage_index)
+        do update set reward_name=$3, metadata_uri=$4, image_uri=$5, rarity=$6, supply_cap=$7, status=$8, updated_at=now()
+        `,
+        [
+          campaignId,
+          stageIndex,
+          rewardName,
+          metadataUri,
+          rwd.imageUri?.trim() || null,
+          rwd.rarity?.trim() || null,
+          rwd.supplyCap != null ? Math.max(0, Math.floor(rwd.supplyCap)) : null,
+          rwd.status?.trim() || "active"
+        ]
+      );
+    }
+    return sendJson(res, 200, { ok: true });
+  });
+  r.post("/creator/:wallet/campaigns/:campaignId/publish-live", async (req, res) => {
+    const wallet = normalizeWallet2(req.params.wallet);
+    const campaignId = req.params.campaignId?.trim();
+    if (!wallet || !campaignId) return sendJson(res, 400, { error: "wallet and campaignId are required" });
+    const campaignOut = await dbQuery(
+      `select id, config_json from creator_campaigns where id = $1 and creator_wallet = $2`,
+      [campaignId, wallet]
+    );
+    const campaign = campaignOut.rows[0];
+    if (!campaign) return sendJson(res, 404, { error: "Campaign not found for this creator" });
+    const linkedCollectionId = typeof campaign.config_json?.linkedCollectionId === "string" ? campaign.config_json.linkedCollectionId : null;
+    if (!linkedCollectionId) return sendJson(res, 400, { error: "Link a collection before publishing" });
+    const colOut = await dbQuery(
+      `select metadata_json from creator_collections where id = $1 and creator_wallet = $2`,
+      [linkedCollectionId, wallet]
+    );
+    const metadata = colOut.rows[0]?.metadata_json;
+    if (!metadata) return sendJson(res, 400, { error: "Linked collection not found" });
+    const hasMint = typeof metadata.collectionMint === "string" && metadata.collectionMint.trim().length > 0;
+    const hasMerkle = typeof metadata.merkleTree === "string" && metadata.merkleTree.trim().length > 0;
+    if (!hasMint || !hasMerkle) {
+      return sendJson(res, 400, { error: "Collection must have on-chain mint and merkle tree before going live" });
+    }
+    const rewards = await dbQuery(
+      `select count(*)::text as count from campaign_stage_rewards where campaign_id = $1 and status = 'active'`,
+      [campaignId]
+    );
+    if (Number(rewards.rows[0]?.count ?? 0) < 4) {
+      return sendJson(res, 400, { error: "Configure all 4 stage rewards before publishing live" });
+    }
+    await dbQuery(`update creator_campaigns set status='published', updated_at=now() where id=$1`, [campaignId]);
+    return sendJson(res, 200, { ok: true, status: "published" });
+  });
+  r.post("/creator/:wallet/launch-campaign", async (req, res) => {
+    const wallet = normalizeWallet2(req.params.wallet);
+    if (!wallet) return sendJson(res, 400, { error: "wallet is required" });
+    const body = req.body;
+    const campaignName = body.campaignName?.trim();
+    const campaignTheme = body.campaignTheme?.trim();
+    const collectionName = body.collectionName?.trim();
+    const collectionMetadataUri = body.collectionMetadataUri?.trim();
+    const supply = Math.max(0, Math.floor(body.supply ?? 0));
+    if (!campaignName || !campaignTheme || !collectionName || !collectionMetadataUri) {
+      return sendJson(res, 400, {
+        error: "campaignName, campaignTheme, collectionName and collectionMetadataUri are required"
+      });
+    }
+    const collectionId = `collection-${nanoid2(10)}`;
+    const campaignId = `creator-${nanoid2(10)}`;
+    const collectionCreate = await bootstrapCollectionNft({
+      name: collectionName,
+      symbol: body.collectionSymbol?.trim() || "DRIP",
+      metadataUri: collectionMetadataUri,
+      sellerFeePercent: body.feePercent ?? 0
+    });
+    const merkleCreate = await bootstrapMerkleTree({
+      maxDepth: body.merkleMaxDepth,
+      maxBufferSize: body.merkleMaxBufferSize
+    });
+    await dbQuery(
+      `
+      insert into creator_collections (
+        id, creator_wallet, name, symbol, description, supply, status, metadata_json, created_at, updated_at
+      )
+      values ($1,$2,$3,$4,$5,$6,'active',$7::jsonb,now(),now())
+      `,
+      [
+        collectionId,
+        wallet,
+        collectionName,
+        body.collectionSymbol?.trim() || null,
+        null,
+        supply,
+        JSON.stringify({
+          collectionSupply: supply,
+          imageUri: body.collectionImageUri?.trim() || null,
+          externalUrl: body.collectionExternalUrl?.trim() || null,
+          collectionMetadataUri,
+          collectionMint: collectionCreate.collectionMint,
+          collectionCreateTx: collectionCreate.txSignature,
+          merkleTree: merkleCreate.merkleTree,
+          merkleCreateTx: merkleCreate.txSignature,
+          chainStatus: "ready"
+        })
+      ]
+    );
+    await dbQuery(
+      `
+      insert into creator_campaigns (
+        id, creator_wallet, name, theme, min_deck_size, entry_ticket_cost, reward_pool, base_royale_reward, prize_preview, status, config_json, created_at, updated_at
+      )
+      values ($1,$2,$3,$4,5,$5,0,$6,'Stage Rewards cNFT','draft',$7::jsonb,now(),now())
+      `,
+      [
+        campaignId,
+        wallet,
+        campaignName,
+        campaignTheme,
+        Math.max(0, Math.floor(body.entryTicketCost ?? 5)),
+        Math.max(1, Math.floor(body.baseRoyaleReward ?? 10)),
+        JSON.stringify({ linkedCollectionId: collectionId })
+      ]
+    );
+    return sendJson(res, 200, {
+      ok: true,
+      campaignId,
+      collectionId,
+      collectionMint: collectionCreate.collectionMint,
+      merkleTree: merkleCreate.merkleTree,
+      txs: { collectionCreate: collectionCreate.txSignature, merkleCreate: merkleCreate.txSignature }
+    });
   });
   return r;
 }
@@ -1591,12 +2616,18 @@ function createSoloCampaignRouter() {
 var __filename = fileURLToPath(import.meta.url);
 var __dirname = path2.dirname(__filename);
 async function startServer() {
-  const app = express4();
+  if (!isDatabaseConfigured()) {
+    throw new Error("DATABASE_URL is required. Add DATABASE_URL in environment before starting server.");
+  }
+  await ensureDatabaseAvailable();
+  console.log("[db] PostgreSQL connection verified");
+  const app = express5();
   const server = createServer(app);
   const matchmaking = createMatchmakingWsServer();
   app.use("/api/escrow", createEscrowRouter());
   app.use("/api/tokenomics", createTokenomicsRouter());
   app.use("/api/campaigns", createSoloCampaignRouter());
+  app.use("/api/users", createUsersRouter());
   server.on("upgrade", (req, socket, head) => {
     const url = req.url || "";
     if (url.startsWith("/ws/matchmaking")) {
@@ -1605,7 +2636,7 @@ async function startServer() {
     }
   });
   const staticPath = process.env.NODE_ENV === "production" ? path2.resolve(__dirname, "public") : path2.resolve(__dirname, "..", "dist", "public");
-  app.use(express4.static(staticPath));
+  app.use(express5.static(staticPath));
   app.get("*", (_req, res) => {
     res.sendFile(path2.join(staticPath, "index.html"));
   });
