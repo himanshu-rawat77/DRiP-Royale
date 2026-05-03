@@ -12,6 +12,35 @@ export interface CampaignSummary {
   rewardPool: number;
   baseRoyaleReward: number;
   entryTicketCost: number;
+  prizePreview?: string;
+  linkedCollectionId?: string;
+  linkedCollectionName?: string;
+  linkedCollectionMint?: string | null;
+}
+
+export interface CampaignEntryPreview {
+  campaignId: string;
+  amount: number;
+  split: { creator: number; rewardPool: number; protocol: number };
+  splitPct: { creator: number; rewardPool: number; protocol: number };
+  royaleBalance?: number;
+  canAfford?: boolean;
+}
+
+export interface CampaignEntryCommitResult {
+  ok: boolean;
+  entryId: string;
+  campaignId: string;
+  amount: number;
+  split: { creator: number; rewardPool: number; protocol: number };
+  royaleBalance: number;
+  challengeTickets: number;
+}
+
+export interface CreatorEarningsResponse {
+  creator: string;
+  totalRoyale: number;
+  byCampaign: Record<string, number>;
 }
 
 export interface CampaignProgress {
@@ -60,6 +89,34 @@ export interface CampaignRunState {
   rewardGranted: boolean;
   royaleBalance: number;
   challengeTickets: number;
+  mintedRewards?: Array<{
+    stageIndex: number;
+    rewardName: string;
+    metadataUri: string;
+    mintTx: string;
+    mintedAssetId: string | null;
+    createdAt: string;
+  }>;
+  onchain?: {
+    enabled: boolean;
+    chainMode: string;
+    campaignStatus: string;
+    runStatus: string | null;
+    finalizedSignature: string | null;
+    claimSignature: string | null;
+  };
+}
+
+export interface ChainIntent {
+  mode: "onchain";
+  action: "publish_campaign" | "pay_entry" | "finalize_run" | "claim_reward";
+  programId: string;
+  campaignPda: string;
+  rewardVaultPda: string;
+  feeVaultPda: string;
+  memo: string;
+  commitmentHash?: string;
+  nonce?: number;
 }
 
 export async function fetchCampaigns(): Promise<CampaignSummary[]> {
@@ -105,6 +162,7 @@ export async function startCampaignRun(input: {
   deck: GameCard[];
   difficulty: CampaignDifficulty;
   useTicket?: boolean;
+  entryId?: string;
 }): Promise<CampaignRunState> {
   const res = await fetch(`/api/campaigns/${encodeURIComponent(input.campaignId)}/runs/start`, {
     method: "POST",
@@ -114,6 +172,135 @@ export async function startCampaignRun(input: {
   const data = (await res.json()) as CampaignRunState | { error?: string };
   if (!res.ok) throw new Error("error" in data && data.error ? data.error : "Could not start campaign run");
   return data as CampaignRunState;
+}
+
+export async function previewCampaignEntry(input: {
+  campaignId: string;
+  walletAddress: string;
+}): Promise<CampaignEntryPreview> {
+  const res = await fetch(`/api/campaigns/${encodeURIComponent(input.campaignId)}/entry/preview`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ walletAddress: input.walletAddress }),
+  });
+  const data = (await res.json()) as CampaignEntryPreview | { error?: string };
+  if (!res.ok) throw new Error("error" in data && data.error ? data.error : "Could not preview entry");
+  return data as CampaignEntryPreview;
+}
+
+export async function commitCampaignEntry(input: {
+  campaignId: string;
+  walletAddress: string;
+}): Promise<CampaignEntryCommitResult & { onchain?: ChainIntent | null }> {
+  const res = await fetch(`/api/campaigns/${encodeURIComponent(input.campaignId)}/entry/commit`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ walletAddress: input.walletAddress }),
+  });
+  const data = (await res.json()) as CampaignEntryCommitResult | { error?: string };
+  if (!res.ok) throw new Error("error" in data && data.error ? data.error : "Could not commit entry");
+  return data as CampaignEntryCommitResult;
+}
+
+export async function fetchCampaignPublishIntent(input: {
+  campaignId: string;
+  creatorWallet: string;
+}): Promise<{ ok: true; intent: ChainIntent }> {
+  const res = await fetch(`/api/campaigns/${encodeURIComponent(input.campaignId)}/onchain/publish-intent`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ creatorWallet: input.creatorWallet }),
+  });
+  const data = (await res.json()) as { ok?: true; intent?: ChainIntent; error?: string };
+  if (!res.ok || !data.intent) throw new Error(data.error ?? "Could not prepare publish intent");
+  return { ok: true, intent: data.intent };
+}
+
+export async function confirmCampaignPublish(input: {
+  campaignId: string;
+  creatorWallet: string;
+  signature: string;
+}): Promise<{ ok: true; status: "published"; signature: string }> {
+  const res = await fetch(`/api/campaigns/${encodeURIComponent(input.campaignId)}/onchain/publish-confirm`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  const data = (await res.json()) as { ok?: true; status?: "published"; signature?: string; error?: string };
+  if (!res.ok || data.status !== "published" || !data.signature) {
+    throw new Error(data.error ?? "Could not confirm publish signature");
+  }
+  return { ok: true, status: "published", signature: data.signature };
+}
+
+export async function fetchFinalizeRunIntent(input: {
+  runId: string;
+  walletAddress: string;
+  chainSignature?: string;
+}): Promise<{ ok: true; intent: ChainIntent }> {
+  const res = await fetch(`/api/campaigns/runs/${encodeURIComponent(input.runId)}/onchain/finalize-intent`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  const data = (await res.json()) as { ok?: true; intent?: ChainIntent; error?: string };
+  if (!res.ok || !data.intent) throw new Error(data.error ?? "Could not prepare finalize intent");
+  return { ok: true, intent: data.intent };
+}
+
+export async function fetchClaimRunIntent(input: {
+  runId: string;
+  walletAddress: string;
+  chainSignature?: string;
+}): Promise<{ ok: true; intent: ChainIntent }> {
+  const res = await fetch(`/api/campaigns/runs/${encodeURIComponent(input.runId)}/onchain/claim-intent`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  const data = (await res.json()) as { ok?: true; intent?: ChainIntent; error?: string };
+  if (!res.ok || !data.intent) throw new Error(data.error ?? "Could not prepare claim intent");
+  return { ok: true, intent: data.intent };
+}
+
+export async function confirmRunOnchain(input: {
+  runId: string;
+  walletAddress: string;
+  stage: "finalize" | "claim";
+  signature: string;
+}): Promise<{ ok: true; status: "finalized" | "claimed" }> {
+  const res = await fetch(`/api/campaigns/runs/${encodeURIComponent(input.runId)}/onchain/confirm`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  const data = (await res.json()) as { ok?: true; status?: "finalized" | "claimed"; error?: string };
+  if (!res.ok || !data.status) throw new Error(data.error ?? "Could not confirm on-chain stage");
+  return { ok: true, status: data.status };
+}
+
+export async function confirmEntryOnchain(input: {
+  entryId: string;
+  walletAddress: string;
+  signature: string;
+}): Promise<{ ok: true; status: "paid"; signature: string }> {
+  const res = await fetch(`/api/campaigns/entries/${encodeURIComponent(input.entryId)}/onchain/confirm`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  const data = (await res.json()) as { ok?: true; status?: "paid"; signature?: string; error?: string };
+  if (!res.ok || data.status !== "paid" || !data.signature) {
+    throw new Error(data.error ?? "Could not confirm entry payment");
+  }
+  return { ok: true, status: "paid", signature: data.signature };
+}
+
+export async function fetchCreatorEarnings(creator: string): Promise<CreatorEarningsResponse> {
+  const res = await fetch(`/api/campaigns/creators/${encodeURIComponent(creator)}/earnings`);
+  const data = (await res.json()) as CreatorEarningsResponse | { error?: string };
+  if (!res.ok) throw new Error("error" in data && data.error ? data.error : "Could not load creator earnings");
+  return data as CreatorEarningsResponse;
 }
 
 export async function pickCampaignCard(input: {

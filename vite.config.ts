@@ -9,6 +9,7 @@ import { createMatchmakingWsServer } from "./server/matchmaking-ws";
 import { createEscrowRouter } from "./server/escrow-routes";
 import { createTokenomicsRouter } from "./server/tokenomics-routes";
 import { createSoloCampaignRouter } from "./server/solo-campaign-routes";
+import { createUsersRouter } from "./server/users-routes";
 
 // =============================================================================
 // Manus Debug Collector - Vite Plugin
@@ -106,6 +107,7 @@ function vitePluginManusDebugCollector(): Plugin {
       server.middlewares.use("/api/escrow", createEscrowRouter());
       server.middlewares.use("/api/tokenomics", createTokenomicsRouter());
       server.middlewares.use("/api/campaigns", createSoloCampaignRouter());
+      server.middlewares.use("/api/users", createUsersRouter());
       server.httpServer?.on("upgrade", (req, socket, head) => {
         try {
           const url = req.url || "";

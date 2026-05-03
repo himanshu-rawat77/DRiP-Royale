@@ -19,17 +19,22 @@ import { createAIStrategy } from '@/lib/aiStrategy';
 import { getMatchmakingService, type MatchmakingMessage } from '@/lib/websocket';
 import { fetchEscrowConfig, ensureEscrowDepositsForMatch } from '@/lib/escrowClient';
 import {
+  confirmRunOnchain,
   continueCampaignRun,
   exitCampaignRun,
+  fetchClaimRunIntent,
+  fetchFinalizeRunIntent,
   pickCampaignCard,
   startCampaignRun,
   type CampaignRunState,
 } from '@/lib/soloCampaignClient';
+import { sendCampaignIntentTransaction } from '@/lib/onchainCampaignTx';
 import { usePhantomWallet } from '@/contexts/PhantomWalletContext';
 import { clearCampaignSession, readCampaignSession, writeCampaignSession } from '@/lib/campaignSession';
 import type { LocalMatch } from '@/lib/localMatchEngine';
 import type { GameCard } from '@/lib/types';
 import type { AIDifficulty } from '@/lib/aiStrategy';
+import { recordMatchHistory } from '@/lib/usersClient';
 
 const ARENA_BG = 'https://d2xsxph8kpxj0f.cloudfront.net/310519663486830791/WuCyWqVdFPbfCADWcJauKD/arena-split-bg-By5zBsUSv6CrFLKpdTgQ8r.webp';
 
@@ -72,6 +77,46 @@ export default function ArenaPage() {
   const [campaignRun, setCampaignRun] = useState<CampaignRunState | null>(null);
   const [campaignBusy, setCampaignBusy] = useState(false);
   const [campaignSession] = useState(() => readCampaignSession());
+  const [rewardPopup, setRewardPopup] = useState<{
+    rewardName: string;
+    mintTx: string;
+    stageIndex: number;
+  } | null>(null);
+  const onchainSettlementDone = useRef<string | null>(null);
+  const seenStageRewards = useRef<string>("");
+
+  const persistMatchResult = (
+    nextMatch: LocalMatch,
+    opts?: { externalMatchId?: string; mode?: string; youAre?: 'player1' | 'player2' | null }
+  ) => {
+    const winnerInfo = getWinnerInfo(nextMatch);
+    if (!winnerInfo || !publicKey) return;
+    const side = opts?.youAre ?? 'player1';
+    const didWin = nextMatch.winner === side;
+    const opponent = didWin ? winnerInfo.loser.name : winnerInfo.winner.name;
+    const captured = didWin ? getNftsCapturedFromOpponent(nextMatch) : [];
+    const result: 'WIN' | 'LOSS' = didWin ? 'WIN' : 'LOSS';
+    const reward = didWin ? `+${captured.length * 10} SOL` : '-';
+
+    const newEntry = {
+      id: `match-${Date.now()}`,
+      opponent,
+      result,
+      date: new Date().toLocaleString(),
+      reward,
+      nftsWon: captured.map((card) => card.assetId || card.name || ''),
+    };
+    setLedger([newEntry, ...ledgerRef.current]);
+    void recordMatchHistory({
+      wallet: publicKey,
+      externalMatchId: opts?.externalMatchId,
+      opponent,
+      result,
+      reward,
+      nftsWon: newEntry.nftsWon,
+      mode: opts?.mode ?? 'local',
+    }).catch(() => {});
+  };
 
   // Handle difficulty selection
   const handleSelectDifficulty = (difficulty: AIDifficulty) => {
@@ -136,6 +181,7 @@ export default function ArenaPage() {
           deck: selectedDeck,
           difficulty: campaignSession.difficulty,
           useTicket: false,
+          entryId: campaignSession.entryId,
         });
         if (cancelled) return;
         setCampaignRun(run);
@@ -158,6 +204,60 @@ export default function ArenaPage() {
   }, [campaignSession, selectedDeck, publicKey, campaignRun, navigate]);
 
   useEffect(() => {
+    if (!campaignRun?.mintedRewards || campaignRun.mintedRewards.length === 0) return;
+    const key = campaignRun.mintedRewards.map((r) => `${r.stageIndex}:${r.mintTx}`).join("|");
+    if (!key || key === seenStageRewards.current) return;
+    seenStageRewards.current = key;
+    const latest = campaignRun.mintedRewards[campaignRun.mintedRewards.length - 1];
+    if (!latest) return;
+    toast.success(`Stage reward minted: ${latest.rewardName}`);
+    setRewardPopup({
+      rewardName: latest.rewardName,
+      mintTx: latest.mintTx,
+      stageIndex: latest.stageIndex,
+    });
+  }, [campaignRun?.mintedRewards]);
+
+  useEffect(() => {
+    if (!campaignRun || !publicKey) return;
+    if (campaignRun.status !== 'completed') return;
+    if (!campaignRun.onchain?.enabled || campaignRun.onchain.chainMode !== 'onchain') return;
+    if (onchainSettlementDone.current === campaignRun.runId) return;
+    onchainSettlementDone.current = campaignRun.runId;
+    void (async () => {
+      try {
+        const finalize = await fetchFinalizeRunIntent({
+          runId: campaignRun.runId,
+          walletAddress: publicKey,
+        });
+        const finalizeSig = await sendCampaignIntentTransaction(publicKey, finalize.intent);
+        await confirmRunOnchain({
+          runId: campaignRun.runId,
+          walletAddress: publicKey,
+          stage: 'finalize',
+          signature: finalizeSig,
+        });
+        const claim = await fetchClaimRunIntent({
+          runId: campaignRun.runId,
+          walletAddress: publicKey,
+        });
+        const claimSig = await sendCampaignIntentTransaction(publicKey, claim.intent);
+        await confirmRunOnchain({
+          runId: campaignRun.runId,
+          walletAddress: publicKey,
+          stage: 'claim',
+          signature: claimSig,
+        });
+        toast.success(`On-chain workflow prepared (${finalize.intent.action} -> ${claim.intent.action})`);
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : 'On-chain settlement flow failed');
+      }
+    })();
+  }, [campaignRun, publicKey]);
+
+  useEffect(() => {
+    // Campaign mode must never run multiplayer escrow/rejoin logic.
+    if (campaignSession) return;
     if (!mpSession || !selectedDeck?.length) return;
 
     const service = getMatchmakingService(mpSession.playerId);
@@ -231,32 +331,49 @@ export default function ArenaPage() {
           mpSettlementDone.current = true;
           window.setTimeout(() => {
             setShowSettlement(true);
-            const won = pl.match!.winner === pl.youAre;
-            if (won) {
-              const captured = getNftsCapturedFromOpponent(pl.match!);
-              const winnerInfo = getWinnerInfo(pl.match!);
-              if (winnerInfo) {
-                const newEntry = {
-                  id: `match-${Date.now()}`,
-                  opponent: winnerInfo.loser.name,
-                  result: 'WIN' as const,
-                  date: new Date().toLocaleString(),
-                  reward: `+${captured.length * 10} SOL`,
-                  nftsWon: captured.map((card) => card.assetId || card.name || ''),
-                };
-                setLedger([newEntry, ...ledgerRef.current]);
-              }
-            }
+            persistMatchResult(pl.match!, {
+              externalMatchId: mpSession?.roomId,
+              mode: 'multiplayer',
+              youAre: pl.youAre,
+            });
           }, 800);
         }
       });
+
+      const unsubEscrow = service.on('escrow_status', (msg: MatchmakingMessage) => {
+        const payload = msg.payload as
+          | {
+              ok?: boolean;
+              transferredToWinner?: string[];
+              failed?: Array<{ assetId: string; error?: string }>;
+            }
+          | undefined;
+        if (!payload) return;
+        if (payload.ok) {
+          const count = payload.transferredToWinner?.length ?? 0;
+          toast.success(
+            count > 0
+              ? `Escrow settled: ${count} NFT transfer(s) confirmed.`
+              : 'Escrow settled successfully.'
+          );
+          return;
+        }
+        const firstError = payload.failed?.[0]?.error ?? 'Unknown settlement failure';
+        toast.error(`Escrow settlement failed: ${firstError}`);
+      });
+
+      const prevUnsub = unsubGame;
+      unsubGame = () => {
+        prevUnsub?.();
+        unsubEscrow?.();
+      };
     })();
 
     return () => {
       cancelled = true;
       unsubGame?.();
     };
-  }, [mpSession, selectedDeck, publicKey, navigate]);
+  }, [campaignSession, mpSession, selectedDeck, publicKey, navigate]);
 
   const handlePickCard = (player: 'player1' | 'player2', assetId: string) => {
     if (!match?.isActive) return;
@@ -313,19 +430,7 @@ export default function ArenaPage() {
     if (!updatedMatch.isActive) {
       setTimeout(() => {
         setShowSettlement(true);
-        const captured = getNftsCapturedFromOpponent(updatedMatch);
-        const winnerInfo = getWinnerInfo(updatedMatch);
-        if (winnerInfo) {
-          const newEntry = {
-            id: `match-${Date.now()}`,
-            opponent: winnerInfo.loser.name,
-            result: 'WIN' as const,
-            date: new Date().toLocaleString(),
-            reward: `+${captured.length * 10} SOL`,
-            nftsWon: captured.map((card) => card.assetId || card.name || ''),
-          };
-          setLedger([newEntry, ...ledgerRef.current]);
-        }
+        persistMatchResult(updatedMatch, { mode: isDummyMode ? 'demo' : 'local' });
       }, 800);
     }
   };
@@ -358,19 +463,7 @@ export default function ArenaPage() {
         if (!next.isActive) {
           setTimeout(() => {
             setShowSettlement(true);
-            const captured = getNftsCapturedFromOpponent(next);
-            const winnerInfo = getWinnerInfo(next);
-            if (winnerInfo) {
-              const newEntry = {
-                id: `match-${Date.now()}`,
-                opponent: winnerInfo.loser.name,
-                result: 'WIN' as const,
-                date: new Date().toLocaleString(),
-                reward: `+${captured.length * 10} SOL`,
-                nftsWon: captured.map((card) => card.assetId || card.name || ''),
-              };
-              setLedger([newEntry, ...ledgerRef.current]);
-            }
+            persistMatchResult(next, { mode: 'demo' });
           }, 800);
         }
         return next;
@@ -1226,6 +1319,38 @@ export default function ArenaPage() {
         </motion.section>
       </main>
       <Footer />
+      {rewardPopup && (
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/70 px-4">
+          <div className="w-full max-w-md drip-panel-hot p-6">
+            <p className="text-sm font-bold mb-2" style={{ color: "#FFFFFF", fontFamily: "'Syne', sans-serif" }}>
+              cNFT Minted to Your Wallet
+            </p>
+            <p className="text-xs mb-2" style={{ color: "#A78BFA" }}>
+              Stage {rewardPopup.stageIndex + 1} cleared
+            </p>
+            <p className="text-sm mb-4" style={{ color: "#FFFFFF" }}>
+              {rewardPopup.rewardName}
+            </p>
+            <a
+              className="text-xs underline"
+              href={`https://explorer.solana.com/tx/${rewardPopup.mintTx}${import.meta.env.NEXT_PUBLIC_SOLANA_NETWORK === "devnet" ? "?cluster=devnet" : ""}`}
+              target="_blank"
+              rel="noreferrer"
+              style={{ color: "#10B981" }}
+            >
+              View Mint Transaction
+            </a>
+            <div className="mt-5">
+              <button
+                onClick={() => setRewardPopup(null)}
+                className="px-4 py-2 rounded bg-violet-600 text-white text-xs font-bold"
+              >
+                CONTINUE
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

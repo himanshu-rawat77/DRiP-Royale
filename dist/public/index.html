@@ -10,8 +10,8 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;700&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
-    <script type="module" crossorigin src="/assets/index-BBMRLW8N.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-DmMGuu8j.css">
+    <script type="module" crossorigin src="/assets/index-BrZ7ynb2.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-GB0Oz7yY.css">
   </head>
 
   <body>
@@ -76,10 +76,20 @@ Error generating stack: `+l.message+`
 </script>
 
     <div id="root"></div>
-    <script
-      defer
-      src="%VITE_ANALYTICS_ENDPOINT%/umami"
-      data-website-id="%VITE_ANALYTICS_WEBSITE_ID%"></script>
+    <script>
+      (function () {
+        const endpoint = "%VITE_ANALYTICS_ENDPOINT%";
+        const websiteId = "%VITE_ANALYTICS_WEBSITE_ID%";
+        const hasEndpoint = endpoint && !endpoint.startsWith("%");
+        const hasWebsiteId = websiteId && !websiteId.startsWith("%");
+        if (!hasEndpoint || !hasWebsiteId) return;
+        const script = document.createElement("script");
+        script.defer = true;
+        script.src = endpoint + "/umami";
+        script.setAttribute("data-website-id", websiteId);
+        document.body.appendChild(script);
+      })();
+    </script>
   </body>
 
 </html>

@@ -30,7 +30,7 @@ export function createTokenomicsRouter(): Router {
     sendJson(res, 200, getTokenomicsConfig());
   });
 
-  r.get("/balance/:wallet", (req, res) => {
+  r.get("/balance/:wallet", async (req, res) => {
     const wallet = req.params.wallet;
     if (!wallet) {
       sendJson(res, 400, { error: "Missing wallet" });
@@ -38,33 +38,33 @@ export function createTokenomicsRouter(): Router {
     }
     sendJson(res, 200, {
       wallet,
-      royaleBalance: getRoyaleBalance(wallet),
-      challengeTickets: getChallengeTickets(wallet),
+      royaleBalance: await getRoyaleBalance(wallet),
+      challengeTickets: await getChallengeTickets(wallet),
     });
   });
 
   // Phase 1 MVP: manual distribution for testing/admin operations.
-  r.post("/distribute", (req, res) => {
+  r.post("/distribute", async (req, res) => {
     const body = req.body as { wallet?: string; amount?: number };
     if (!body.wallet || typeof body.amount !== "number" || body.amount <= 0) {
       sendJson(res, 400, { error: "wallet and positive amount are required" });
       return;
     }
-    const out = distributeRoyale(body.wallet, body.amount);
+    const out = await distributeRoyale(body.wallet, body.amount);
     sendJson(res, 200, { ok: true, wallet: body.wallet, royaleBalance: out.balance });
   });
 
-  r.post("/airdrop", (req, res) => {
+  r.post("/airdrop", async (req, res) => {
     const body = req.body as { wallet?: string };
     if (!body.wallet) {
       sendJson(res, 400, { error: "wallet is required" });
       return;
     }
-    const out = distributeRoyale(body.wallet, 100);
+    const out = await distributeRoyale(body.wallet, 100);
     sendJson(res, 200, { ok: true, wallet: body.wallet, royaleBalance: out.balance, airdropped: 100 });
   });
 
-  r.post("/tickets/purchase", (req, res) => {
+  r.post("/tickets/purchase", async (req, res) => {
     const body = req.body as { wallet?: string; ticketCount?: number; royaleCostPerTicket?: number };
     const wallet = body.wallet;
     const ticketCount = Math.max(1, Math.floor(body.ticketCount ?? 1));
@@ -74,13 +74,13 @@ export function createTokenomicsRouter(): Router {
       return;
     }
 
-    const spendResult = spendRoyale(wallet, ticketCount * royaleCostPerTicket);
+    const spendResult = await spendRoyale(wallet, ticketCount * royaleCostPerTicket);
     if (!spendResult.ok) {
       sendJson(res, 400, { error: spendResult.error });
       return;
     }
 
-    const tickets = addChallengeTickets(wallet, ticketCount);
+    const tickets = await addChallengeTickets(wallet, ticketCount);
     sendJson(res, 200, {
       ok: true,
       royaleBalance: spendResult.balance,
