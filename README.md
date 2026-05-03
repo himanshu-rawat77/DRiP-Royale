@@ -5,6 +5,7 @@ A professional Solana-based NFT card game platform built with React, TypeScript,
 ## 📋 Table of Contents
 
 - [Features](#features)
+- [Campaign mode](#campaign-mode)
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
 - [Configuration](#configuration)
@@ -15,28 +16,50 @@ A professional Solana-based NFT card game platform built with React, TypeScript,
 
 ## ✨ Features
 
-- **The Vault**: Build and manage your NFT deck (5-52 cards)
-- **The Arena**: Play card battles against AI opponents with three difficulty levels
-- **The Profile**: Manage your wallet, view NFTs, track achievements, and check match history
-- **AI Opponents**: Easy (Rookie), Medium (Veteran), Hard (Legend) difficulty levels
-- **Achievement System**: Unlock badges for milestones and achievements
-- **Local Match Engine**: Play matches without wallet connection using demo mode
-- **Match Settlement**: Automatic NFT transfer and ledger tracking
+- **The Vault**: Build and manage your deck (demo cards or wallet NFTs from Helius); special flow when a **campaign** is active
+- **The Arena**: Card battles against AI (Easy / Medium / Hard) or **multiplayer** via matchmaking
+- **Campaign mode** (`/campaigns`): Solo PvE **staged runs** (four stages per run), **ROYALE** entry economics, creator-published campaigns, optional on-chain memo intents
+- **Creator dashboard** (`/creator`): Create collections, configure campaigns, stage rewards, publish live
+- **Matchmaking** (`/matchmaking`): WebSocket-backed queue (`/ws/matchmaking`) and escrow-related API
+- **Tokenomics API**: In-app **ROYALE** balance and challenge tickets (PostgreSQL-backed)
+- **The Profile**: Wallet, NFTs, achievements, ledger-oriented history (local + server where wired)
+- **Achievement System**: Unlock badges for milestones
+- **Shared match engine**: Same flip logic in the client and Express (`shared/matchEngine`)
+
+## Campaign mode
+
+**What works today**
+
+- Players open **Campaigns**, connect **Phantom**, choose a campaign and difficulty (**normal** / **hard** / **nightmare**), and **pay entry** in ROYALE (split: creator, reward pool, protocol). They receive an `entryId` stored in `sessionStorage` with `campaignSession`.
+- **Vault** switches to **campaign mode**: for the current MVP, only the **demo deck** is allowed so runs stay fair and testable with a known card pool.
+- **Arena** starts a **server-side run** (`campaign_runs`): each stage is a full match; the server builds a scaled opponent deck from the player deck. The client sends picks via `pickCampaignCard`; AI replies are resolved on the server.
+- **Progress** and **balances** persist in Postgres (`campaign_progress`, `token_wallets`, etc.). **Stage rewards** can mint compressed NFTs when the server mint path is configured.
+- **Optional on-chain layer**: when enabled, the wallet signs transactions that include **Memo program** payloads (`publish_campaign`, `pay_entry`, `finalize_run`, `claim_reward`) derived in `server/onchain-campaign.ts` and sent via `client/src/lib/onchainCampaignTx.ts`. This is scaffolding toward a real program, not a substitute for audited vault logic.
+
+**What we want to achieve**
+
+- **Creator economy**: Creators ship themed campaigns; entry fees fund creators, a visible reward pool, and protocol fee—see [ARCHITECTURE.md](./ARCHITECTURE.md) for splits and tables.
+- **Verifiable runs**: Commitment hashes tie deck and run metadata to **finalize** steps so outcomes can be checked against what was committed.
+- **Real on-chain settlement**: Move from memo intents to an **Anchor** program with PDAs for campaign, reward vault, and fees—`CAMPAIGN_PROGRAM_ID` and `ONCHAIN_CAMPAIGNS_ENABLED` are the hooks for that migration.
+- **Richer rewards**: ROYALE plus **cNFT** (and later hybrid) rewards per stage; metadata driven from the creator dashboard.
+
+For diagrams, API touchpoints, and file map, read **[ARCHITECTURE.md](./ARCHITECTURE.md)**.
 
 ## 🔧 Prerequisites
 
 Before you begin, ensure you have the following installed:
 
 - **Node.js** (v18 or higher)
-- **pnpm** (v10 or higher) - Package manager
-- **Git** - Version control
+- **pnpm** (v10 or higher) — package manager
+- **PostgreSQL** — required for tokenomics, campaigns, users, and related APIs (`DATABASE_URL`)
+- **Git** — version control
 
 ## 📦 Installation
 
 ### 1. Clone the Repository
 
 ```bash
-gh repo clone himanshu-rawat77/DRiP_Royale
+git clone <your-fork-or-origin-url>
 cd drip-royale-web
 ```
 
@@ -46,51 +69,47 @@ cd drip-royale-web
 pnpm install
 ```
 
-### 3. Install Additional Packages (if needed)
-
-```bash
-pnpm add framer-motion axios wouter zod react-hook-form
-```
-
 ## ⚙️ Configuration
 
 ### Environment Variables
 
-Create a `.env.local` file in the project root with the following variables:
+Create a `.env.local` file in the **project root** (Vite `envDir` is the repo root). Example:
 
 ```env
-# Helius API Configuration (Required for NFT loading)
+# Database (required for /api/tokenomics, /api/campaigns, /api/users, etc.)
+DATABASE_URL=postgresql://USER:PASSWORD@localhost:5432/drip_royale
+
+# Helius — NFT loading and RPC for wallet txs
 VITE_HELIUS_API_KEY=your_helius_api_key_here
 VITE_HELIUS_API_URL=https://mainnet.helius-rpc.com
 
-# Solana Configuration (Optional - for future wallet integration)
+# Solana
 VITE_SOLANA_NETWORK=mainnet-beta
-VITE_SOLANA_RPC_URL=https://api.mainnet-beta.solana.com
 
-# Application Configuration
+# Campaign on-chain scaffolding (optional)
+# ONCHAIN_CAMPAIGNS_ENABLED=true
+# CAMPAIGN_PROGRAM_ID=<pubkey when Anchor program exists>
+
 VITE_APP_NAME=DRiP Royale
 VITE_APP_VERSION=1.0.0
 ```
 
+Apply the SQL schema (once per database):
+
+```bash
+pnpm db:init
+# or run server/db-schema.sql against your Postgres instance
+```
+
 ### Helius API Setup
 
-1. **Get Helius API Key**:
-   - Visit [helius.dev](https://helius.dev)
-   - Sign up for a free account
-   - Create a new API key in your dashboard
-   - Copy the API key
+1. Visit [helius.dev](https://helius.dev), create an API key.
+2. Set `VITE_HELIUS_API_KEY` in `.env.local`.
 
-2. **Add to Environment**:
-   - Open `.env.local`
-   - Add: `VITE_HELIUS_API_KEY=your_key_here`
+### Wallet
 
-### Optional: Wallet Integration (Future)
-
-For Solana wallet connection, you'll need:
-
-- **Phantom Wallet**: Install the browser extension
-- **Magic Link**: For email-based authentication (optional)
-- **Anchor Framework**: For smart contract interactions (future)
+- **Phantom** is used for signing (campaign entry, memo intents, future program txs).
+- Install the [Phantom](https://phantom.app/) browser extension for full campaign and creator flows.
 
 ## 🚀 Running the Project
 
@@ -100,15 +119,20 @@ For Solana wallet connection, you'll need:
 pnpm dev
 ```
 
-The application will start at `http://localhost:3000`
+Vite serves the React app and **mounts the Express routers** on the same dev server (`/api/*`, `/ws/matchmaking`). Ensure `DATABASE_URL` is set so campaign and tokenomics routes can reach Postgres.
 
-### Build for Production
+App URL: `http://localhost:3000` (or the next free port if 3000 is busy).
+
+### Production
 
 ```bash
 pnpm build
+pnpm start
 ```
 
-### Preview Production Build
+`pnpm build` outputs the client to `dist/public` and bundles `server/index.ts` to `dist/index.js`. `pnpm start` runs the Node server, which requires `DATABASE_URL` and serves the built SPA.
+
+### Preview Production Build (client only)
 
 ```bash
 pnpm preview
@@ -130,50 +154,26 @@ pnpm format
 
 ```
 drip-royale-web/
-├── client/
-│   ├── public/              # Static assets (favicon, robots.txt)
-│   ├── src/
-│   │   ├── components/      # Reusable React components
-│   │   │   ├── TopBar.tsx
-│   │   │   ├── Hero.tsx
-│   │   │   ├── Vault.tsx
-│   │   │   ├── Arena.tsx
-│   │   │   ├── DifficultySelector.tsx
-│   │   │   ├── AchievementBadges.tsx
-│   │   │   └── ...
-│   │   ├── pages/           # Page components
-│   │   │   ├── Home.tsx
-│   │   │   ├── VaultPage.tsx
-│   │   │   ├── ArenaPage.tsx
-│   │   │   ├── ProfilePage.tsx
-│   │   │   ├── LeaderboardPage.tsx
-│   │   │   └── LedgerPage.tsx
-│   │   ├── lib/             # Utility functions and logic
-│   │   │   ├── types.ts     # TypeScript type definitions
-│   │   │   ├── warEngine.ts # Game mechanics
-│   │   │   ├── aiStrategy.ts # AI opponent logic
-│   │   │   ├── helius.ts    # Helius API integration
-│   │   │   ├── localMatchEngine.ts # Local match simulation
-│   │   │   ├── cardData.ts  # Card data constants
-│   │   │   └── websocket.ts # WebSocket utilities
-│   │   ├── hooks/           # React custom hooks
-│   │   │   ├── useGameState.ts
-│   │   │   ├── useMatchmaking.ts
-│   │   │   ├── useHeliusAssets.ts
-│   │   │   └── useLocalStorage.ts
-│   │   ├── contexts/        # React contexts
-│   │   │   ├── DeckContext.tsx
-│   │   │   └── DummyDeckContext.tsx
-│   │   ├── App.tsx          # Main app component with routing
-│   │   ├── main.tsx         # React entry point
-│   │   └── index.css        # Global styles and design tokens
-│   └── index.html           # HTML template
-├── server/                  # Backend server (Express)
-├── package.json             # Dependencies and scripts
-├── tsconfig.json            # TypeScript configuration
-├── tailwind.config.js       # Tailwind CSS configuration
-├── vite.config.ts           # Vite configuration
-└── README.md                # This file
+├── client/src/              # React app (Vite root)
+│   ├── pages/               # Home, Vault, Arena, Profile, Ledger, Leaderboard,
+│   │                        # Matchmaking, SoloCampaign, CreatorDashboard, Docs, …
+│   ├── lib/                 # helius, localMatchEngine, soloCampaignClient,
+│   │                        # onchainCampaignTx, campaignSession, websocket, …
+│   ├── components/, hooks/, contexts/
+│   └── App.tsx              # Routes: /campaigns, /creator, /matchmaking, …
+├── server/                  # Express routers + WS + DB helpers
+│   ├── index.ts             # Production HTTP server + static SPA
+│   ├── solo-campaign-routes.ts
+│   ├── tokenomics-routes.ts, tokenomics-store.ts
+│   ├── escrow-routes.ts, escrow-settlement.ts
+│   ├── users-routes.ts, matchmaking-ws.ts
+│   ├── onchain-campaign.ts, campaign-reward-mint.ts, db.ts, db-schema.sql
+│   └── scripts/init-db.ts
+├── shared/                  # matchEngine, helius RPC helpers (client + server)
+├── dist/                    # Build output (public + server bundle)
+├── ARCHITECTURE.md          # System design and campaign deep-dive
+├── vite.config.ts           # Dev server + /api middleware + WS upgrade
+└── package.json
 ```
 
 ## 🔌 API Integration
@@ -202,13 +202,18 @@ const assets = await getAssetsByOwner(walletAddress);
 - Free tier: 100 requests/minute
 - Paid tier: Higher limits available
 
-### WebSocket API (Future)
+### Backend REST (Vite dev and production)
 
-**Purpose**: Real-time multiplayer matchmaking and match synchronization
+| Prefix | Purpose |
+|--------|---------|
+| `/api/tokenomics` | ROYALE, challenge tickets |
+| `/api/campaigns` | Solo campaigns, runs, entries, progress |
+| `/api/users` | Creator campaigns, collections, dashboard |
+| `/api/escrow` | Multiplayer escrow flows |
 
-**Configuration**: Will be added when backend server is implemented
+### WebSocket
 
-**Location**: `client/src/lib/websocket.ts`
+**Path**: `/ws/matchmaking` — matchmaking and session sync (`server/matchmaking-ws.ts`, `client/src/lib/websocket.ts`).
 
 ## 🎮 Game Logic Files
 
@@ -218,7 +223,9 @@ const assets = await getAssetsByOwner(walletAddress);
 |------|---------|
 | `lib/warEngine.ts` | Core game mechanics (card comparison, Royale War logic) |
 | `lib/aiStrategy.ts` | AI opponent strategies (Easy, Medium, Hard) |
-| `lib/localMatchEngine.ts` | Local match simulation and settlement |
+| `lib/localMatchEngine.ts` | Client wrapper around `shared/matchEngine` |
+| `lib/soloCampaignClient.ts` | Campaign REST client |
+| `shared/matchEngine.ts` | Authoritative flip logic (also used on server) |
 | `lib/types.ts` | TypeScript interfaces and types |
 
 ### Data Management
@@ -318,11 +325,11 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ## 🎯 Next Steps
 
-1. **Wallet Integration**: Connect Phantom wallet for real NFT loading
-2. **Smart Contract**: Deploy settlement contract on Solana
-3. **Multiplayer**: Implement real-time opponent matching
-4. **Leaderboard**: Add global rankings and seasonal resets
-5. **Mobile**: Optimize for mobile devices
+1. **Anchor campaign program**: Replace memo-only intents with audited on-chain vaults and settlement.
+2. **Campaign deck policy**: Allow wallet NFTs in campaigns when fairness and verification are defined.
+3. **Multiplayer depth**: Harden escrow + WS state machine; surface global stats from `match_history`.
+4. **Leaderboard / seasons**: Tie ROYALE and campaigns to seasonal resets.
+5. **Mobile**: Responsive polish for campaign and arena flows.
 
 ## 📞 Support
 

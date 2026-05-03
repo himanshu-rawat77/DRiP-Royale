@@ -1,15 +1,33 @@
 import { motion } from 'framer-motion';
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import TopBar from '@/components/TopBar';
 import Footer from '@/components/Footer';
 import { useLedgerStorage } from '@/hooks/useLocalStorage';
 import { usePhantomWallet } from '@/contexts/PhantomWalletContext';
+import { fetchMatchHistory, type MatchHistoryEntry } from '@/lib/usersClient';
 
 export default function LedgerPage() {
   const { publicKey } = usePhantomWallet();
   const [ledger] = useLedgerStorage(publicKey);
-  const wonCount = useMemo(() => ledger.filter((e) => e.result === 'WIN').length, [ledger]);
-  const lostCount = useMemo(() => ledger.filter((e) => e.result === 'LOSS').length, [ledger]);
+  const [remoteHistory, setRemoteHistory] = useState<MatchHistoryEntry[]>([]);
+  const data = remoteHistory.length > 0 ? remoteHistory : ledger;
+  const wonCount = useMemo(() => data.filter((e) => e.result === 'WIN').length, [data]);
+  const lostCount = useMemo(() => data.filter((e) => e.result === 'LOSS').length, [data]);
+
+  useEffect(() => {
+    if (!publicKey) {
+      setRemoteHistory([]);
+      return;
+    }
+    void (async () => {
+      try {
+        const out = await fetchMatchHistory(publicKey);
+        setRemoteHistory(out.entries);
+      } catch {
+        /* fallback to local */
+      }
+    })();
+  }, [publicKey]);
 
   return (
     <div className="min-h-screen flex flex-col bg-black">
@@ -69,7 +87,7 @@ export default function LedgerPage() {
               className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-12"
             >
               {[
-                { label: 'TOTAL MATCHES', value: ledger.length, icon: '⚔️', color: '#A78BFA' },
+                { label: 'TOTAL MATCHES', value: data.length, icon: '⚔️', color: '#A78BFA' },
                 { label: 'WON', value: wonCount, icon: '✓', color: '#8B5CF6' },
                 { label: 'LOST', value: lostCount, icon: '✗', color: '#F59E0B' },
               ].map((stat, index) => (
@@ -110,7 +128,7 @@ export default function LedgerPage() {
               transition={{ duration: 0.6, delay: 0.2 }}
               className="space-y-4"
             >
-              {ledger.map((entry, index) => (
+              {data.map((entry, index) => (
                 <motion.div
                   key={entry.id}
                   initial={{ opacity: 0, x: -20 }}
@@ -187,7 +205,7 @@ export default function LedgerPage() {
             </motion.div>
 
             {/* Empty State Message */}
-            {ledger.length === 0 && (
+            {data.length === 0 && (
               <motion.div
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}

@@ -1,10 +1,12 @@
 import { motion } from 'framer-motion';
 import { useEffect, useState } from 'react';
 import { useLocation } from 'wouter';
+import { toast } from 'sonner';
 import TopBar from '@/components/TopBar';
 import Footer from '@/components/Footer';
 import { useDeck } from '@/contexts/DeckContext';
 import { useMatchmaking } from '@/hooks/useMatchmaking';
+import { fetchEscrowConfig } from '@/lib/escrowClient';
 
 const MATCHMAKING_BG = 'https://d2xsxph8kpxj0f.cloudfront.net/310519663486830791/WuCyWqVdFPbfCADWcJauKD/arena-split-bg-By5zBsUSv6CrFLKpdTgQ8r.webp';
 
@@ -39,12 +41,21 @@ export default function MatchmakingPage() {
     }
   }, [matchmaking.currentRoom, matchmaking.playerId, navigate]);
 
-  const handleJoinQueue = () => {
-    if (selectedDeck) {
-      setQueueStatus('joining');
-      matchmaking.joinQueue(selectedDeck.length);
-      setTimeout(() => setQueueStatus('waiting'), 500);
+  const handleJoinQueue = async () => {
+    if (!selectedDeck) return;
+    try {
+      const cfg = await fetchEscrowConfig();
+      if (!cfg.enabled || !cfg.custodyPubkey) {
+        toast.error('Escrow is not configured on backend. Set CUSTODY_PRIVATE_KEY before multiplayer.');
+        return;
+      }
+    } catch {
+      toast.error('Could not verify escrow config');
+      return;
     }
+    setQueueStatus('joining');
+    matchmaking.joinQueue(selectedDeck.length);
+    setTimeout(() => setQueueStatus('waiting'), 500);
   };
 
   const handleLeaveQueue = () => {

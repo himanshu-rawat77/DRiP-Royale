@@ -6,11 +6,19 @@ import { createMatchmakingWsServer } from "./matchmaking-ws";
 import { createEscrowRouter } from "./escrow-routes";
 import { createTokenomicsRouter } from "./tokenomics-routes";
 import { createSoloCampaignRouter } from "./solo-campaign-routes";
+import { createUsersRouter } from "./users-routes";
+import { ensureDatabaseAvailable, isDatabaseConfigured } from "./db";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 async function startServer() {
+  if (!isDatabaseConfigured()) {
+    throw new Error("DATABASE_URL is required. Add DATABASE_URL in environment before starting server.");
+  }
+  await ensureDatabaseAvailable();
+  console.log("[db] PostgreSQL connection verified");
+
   const app = express();
   const server = createServer(app);
   const matchmaking = createMatchmakingWsServer();
@@ -18,6 +26,7 @@ async function startServer() {
   app.use("/api/escrow", createEscrowRouter());
   app.use("/api/tokenomics", createTokenomicsRouter());
   app.use("/api/campaigns", createSoloCampaignRouter());
+  app.use("/api/users", createUsersRouter());
 
   server.on("upgrade", (req, socket, head) => {
     const url = req.url || "";
