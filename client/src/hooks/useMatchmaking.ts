@@ -10,7 +10,7 @@ export interface MatchmakingState {
   error: string | null;
 }
 
-export function useMatchmaking(playerId: string) {
+export function useMatchmaking(playerId: string, walletAddress?: string | null) {
   const [state, setState] = useState<MatchmakingState>({
     playerId,
     isConnected: false,
@@ -24,7 +24,7 @@ export function useMatchmaking(playerId: string) {
 
   // Initialize matchmaking service (stays connected when navigating to Arena for multiplayer sync)
   useEffect(() => {
-    const service = getMatchmakingService(playerId);
+    const service = getMatchmakingService(playerId, undefined, walletAddress ?? undefined);
 
     const unsubs: Array<() => void> = [
       service.on('match_found', (msg: MatchmakingMessage) => {
@@ -86,11 +86,11 @@ export function useMatchmaking(playerId: string) {
       clearInterval(interval);
       unsubs.forEach((u) => u());
     };
-  }, [playerId]);
+  }, [playerId, walletAddress]);
 
   const joinQueue = useCallback(
     (deckSize: number) => {
-      const service = getMatchmakingService(playerId);
+      const service = getMatchmakingService(playerId, undefined, walletAddress ?? undefined);
       if (service.isConnected()) {
         setState((prev) => ({
           ...prev,
@@ -106,11 +106,11 @@ export function useMatchmaking(playerId: string) {
         }));
       }
     },
-    [playerId]
+    [playerId, walletAddress]
   );
 
   const leaveQueue = useCallback(() => {
-    const service = getMatchmakingService(playerId);
+    const service = getMatchmakingService(playerId, undefined, walletAddress ?? undefined);
     if (service.isConnected()) {
       setState((prev) => ({
         ...prev,
@@ -119,26 +119,26 @@ export function useMatchmaking(playerId: string) {
       queueStartTimeRef.current = null;
       service.leaveQueue();
     }
-  }, [playerId]);
+  }, [playerId, walletAddress]);
 
   const sendPlayerAction = useCallback(
     (action: Record<string, any>) => {
-      const service = getMatchmakingService(playerId);
+      const service = getMatchmakingService(playerId, undefined, walletAddress ?? undefined);
       if (service.isConnected() && state.currentRoom) {
         service.sendPlayerAction(state.currentRoom.roomId, action);
       }
     },
-    [playerId, state.currentRoom]
+    [playerId, walletAddress, state.currentRoom]
   );
 
   const endMatch = useCallback(
     (result: 'win' | 'loss' | 'draw') => {
-      const service = getMatchmakingService(playerId);
+      const service = getMatchmakingService(playerId, undefined, walletAddress ?? undefined);
       if (service.isConnected() && state.currentRoom) {
         service.endMatch(state.currentRoom.roomId, result);
       }
     },
-    [playerId, state.currentRoom]
+    [playerId, walletAddress, state.currentRoom]
   );
 
   const clearError = useCallback(() => {

@@ -1,9 +1,9 @@
 import { useState, useCallback } from 'react';
 import { fetchDripAssetsForDeck } from '@/lib/helius';
-import type { GameCard } from '@/lib/types';
+import type { DripGameCard } from '@/lib/helius';
 
 export interface UseHeliusAssetsState {
-  assets: GameCard[];
+  assets: DripGameCard[];
   loading: boolean;
   error: string | null;
 }

@@ -106,7 +106,7 @@ export default function TopBar() {
           className="flex items-center gap-2 cursor-pointer"
         >
           <span className="text-xl font-bold text-white" style={{ fontFamily: "'Syne', sans-serif" }}>
-            <span style={{ color: '#F59E0B' }}>◆</span> DRIP ROYALE
+            {/* <span style={{ color: '#F59E0B' }}>◆</span>*/} DRIP ROYALE 
           </span>
         </motion.div>
 

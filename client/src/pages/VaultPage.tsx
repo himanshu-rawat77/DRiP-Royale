@@ -8,12 +8,14 @@ import { useDeck } from '@/contexts/DeckContext';
 import { useDummyDeck } from '@/contexts/DummyDeckContext';
 import { usePhantomWallet } from '@/contexts/PhantomWalletContext';
 import { useHeliusAssets } from '@/hooks/useHeliusAssets';
+import type { DripGameCard } from '@/lib/helius';
 import { NFT_CARDS } from '@/lib/cardData';
 import { clearCampaignSession, readCampaignSession } from '@/lib/campaignSession';
 import type { GameCard } from '@/lib/types';
 
 const VAULT_BG =
   'https://d2xsxph8kpxj0f.cloudfront.net/310519663486830791/WuCyWqVdFPbfCADWcJauKD/card-pattern-bg-By5zBsUSv6CrFLKpdTgQ8r.webp';
+const CAMPAIGN_DECK_SIZE = 5;
 
 export default function VaultPage() {
   const [, navigate] = useLocation();
@@ -29,14 +31,15 @@ export default function VaultPage() {
   } = useDummyDeck();
   const { assets, loading, error, loadAssets, clearError, reset } = useHeliusAssets();
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [flippedCards, setFlippedCards] = useState<Set<string>>(new Set());
   const [campaignMode, setCampaignMode] = useState(false);
 
   useEffect(() => {
     const activeCampaign = !!readCampaignSession();
     setCampaignMode(activeCampaign);
     if (activeCampaign) {
-      // Campaign mode is intentionally demo-only for MVP fairness/testing.
-      setIsDummyMode(true);
+      // Campaign decks now support real wallet NFTs by default.
+      setIsDummyMode(false);
       setSelected(new Set());
     }
   }, []);
@@ -64,9 +67,10 @@ export default function VaultPage() {
   const toggleCardSelection = (cardId: string) => {
     setSelected((prev) => {
       const next = new Set(prev);
+      const maxSelectable = campaignMode ? CAMPAIGN_DECK_SIZE : 52;
       if (next.has(cardId)) {
         next.delete(cardId);
-      } else if (next.size < 52) {
+      } else if (next.size < maxSelectable) {
         next.add(cardId);
       }
       return next;
@@ -84,20 +88,16 @@ export default function VaultPage() {
 
   const handleSelectDummyCard = (card: (typeof NFT_CARDS)[number]) => {
     const cardId = card.id.toString();
+    const maxSelectable = campaignMode ? CAMPAIGN_DECK_SIZE : 52;
     if (selectedDummyCards.some((c) => c.id === card.id)) {
       removeDummyCard(cardId);
-    } else if (selectedDummyCards.length < 52) {
+    } else if (selectedDummyCards.length < maxSelectable) {
       addDummyCard(card);
     }
   };
 
   const handleBuildDeck = () => {
     const campaignSession = readCampaignSession();
-    if (campaignSession && !isDummyMode) {
-      toast.error("Campaign mode uses demo campaign cards only.");
-      setIsDummyMode(true);
-      return;
-    }
     if (isDummyMode) {
       if (selectedDummyCards.length < 2) return;
       if (campaignSession) {
@@ -121,6 +121,15 @@ export default function VaultPage() {
     navigate(campaignSession ? '/arena' : '/matchmaking');
   };
 
+  const toggleCardFlip = (assetId: string) => {
+    setFlippedCards((prev) => {
+      const next = new Set(prev);
+      if (next.has(assetId)) next.delete(assetId);
+      else next.add(assetId);
+      return next;
+    });
+  };
+
   const handleClearSelection = () => {
     if (isDummyMode) {
       clearDummyDeck();
@@ -141,9 +150,13 @@ export default function VaultPage() {
   };
 
   const selectedCount = isDummyMode ? selectedDummyCards.length : selected.size;
-  const canEnterWallet = selected.size >= 2 && selected.size <= 52 && assets.length > 0 && !loading;
-  const canEnterDummy = isDummyMode && selectedDummyCards.length >= 2;
-  const canEnter = campaignMode ? canEnterDummy : isDummyMode ? canEnterDummy : canEnterWallet;
+  const canEnterWallet = campaignMode
+    ? selected.size === CAMPAIGN_DECK_SIZE && assets.length > 0 && !loading
+    : selected.size >= 2 && selected.size <= 52 && assets.length > 0 && !loading;
+  const canEnterDummy = campaignMode
+    ? isDummyMode && selectedDummyCards.length === CAMPAIGN_DECK_SIZE
+    : isDummyMode && selectedDummyCards.length >= 2;
+  const canEnter = isDummyMode ? canEnterDummy : canEnterWallet;
 
   return (
     <div className="min-h-screen flex flex-col bg-black">
@@ -210,7 +223,7 @@ export default function VaultPage() {
                 }}
               >
                 {campaignMode
-                  ? 'Campaign mode is active. Build 2–52 cards here, then continue to the Arena for staged matches.'
+                  ? 'Campaign mode is active. Build exactly 5 cards here, then continue to the Arena for staged matches.'
                   : isDummyMode
                   ? 'Build your deck with demo cards. Select 2–52 cards to jump into the arena.'
                   : publicKey
@@ -385,7 +398,7 @@ export default function VaultPage() {
                         border: '1px solid rgba(255, 255, 255, 0.12)',
                       }}
                     >
-                      {campaignMode ? 'EXIT DEMO (CAMPAIGN)' : 'EXIT DEMO'}
+                      EXIT DEMO
                     </motion.button>
                   </div>
                 </motion.div>
@@ -498,7 +511,9 @@ export default function VaultPage() {
                     }}
                   >
                     {selectedDummyCards.length < 2
-                      ? `SELECT ${2 - selectedDummyCards.length} MORE CARDS`
+                      ? campaignMode
+                        ? `SELECT ${Math.max(0, CAMPAIGN_DECK_SIZE - selectedDummyCards.length)} MORE CARDS`
+                        : `SELECT ${2 - selectedDummyCards.length} MORE CARDS`
                       : campaignMode
                         ? 'ENTER CAMPAIGN ARENA'
                         : 'ENTER THE ARENA'}
@@ -510,7 +525,7 @@ export default function VaultPage() {
                       color: 'rgba(255, 255, 255, 0.4)',
                     }}
                   >
-                    {selectedDummyCards.length}/52 CARDS SELECTED
+                    {selectedDummyCards.length}/{campaignMode ? CAMPAIGN_DECK_SIZE : 52} CARDS SELECTED
                   </p>
                 </motion.div>
               </>
@@ -582,23 +597,25 @@ export default function VaultPage() {
                     >
                       CLEAR
                     </motion.button>
-                    <motion.button
-                      whileHover={{ scale: 1.05 }}
-                      whileTap={{ scale: 0.95 }}
-                      onClick={() => {
-                        setSelected(new Set());
-                        setIsDummyMode(true);
-                      }}
-                      className="px-4 py-2 text-xs font-bold rounded-lg"
-                      style={{
-                        fontFamily: "'Syne', sans-serif",
-                        background: 'rgba(139, 92, 246, 0.1)',
-                        color: '#8B5CF6',
-                        border: '1px solid rgba(139, 92, 246, 0.25)',
-                      }}
-                    >
-                      PLAY DEMO MATCH
-                    </motion.button>
+                    {!campaignMode && (
+                      <motion.button
+                        whileHover={{ scale: 1.05 }}
+                        whileTap={{ scale: 0.95 }}
+                        onClick={() => {
+                          setSelected(new Set());
+                          setIsDummyMode(true);
+                        }}
+                        className="px-4 py-2 text-xs font-bold rounded-lg"
+                        style={{
+                          fontFamily: "'Syne', sans-serif",
+                          background: 'rgba(139, 92, 246, 0.1)',
+                          color: '#8B5CF6',
+                          border: '1px solid rgba(139, 92, 246, 0.25)',
+                        }}
+                      >
+                        PLAY DEMO MATCH
+                      </motion.button>
+                    )}
                     <motion.button
                       whileHover={{ scale: 1.05 }}
                       whileTap={{ scale: 0.95 }}
@@ -672,16 +689,17 @@ export default function VaultPage() {
                     transition={{ duration: 0.6 }}
                     className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6 mb-12"
                   >
-                    {assets.map((card: GameCard, index: number) => {
+                    {assets.map((card: DripGameCard, index: number) => {
                       const isSelected = selected.has(card.assetId);
+                      const isFlipped = flippedCards.has(card.assetId);
+                      const profile = card.powerProfile;
                       return (
                         <motion.div
                           key={card.assetId}
                           initial={{ opacity: 0, scale: 0.8 }}
                           animate={{ opacity: 1, scale: 1 }}
                           transition={{ duration: 0.3, delay: index * 0.02 }}
-                          whileHover={{ scale: 1.05 }}
-                          onClick={() => toggleCardSelection(card.assetId)}
+                          whileHover={{ scale: 1.03 }}
                           className="cursor-pointer relative group"
                         >
                           <div
@@ -698,51 +716,114 @@ export default function VaultPage() {
                                 : 'none',
                             }}
                           >
-                            <div className="relative w-full aspect-[2/3] overflow-hidden">
-                              <img
-                                src={card.imageUri}
-                                alt={card.name}
-                                className="w-full h-full object-cover"
-                              />
+                            <motion.div
+                              animate={{ rotateY: isFlipped ? 180 : 0 }}
+                              transition={{ duration: 0.45 }}
+                              style={{ transformStyle: 'preserve-3d' }}
+                              className="relative w-full aspect-[2/3]"
+                            >
                               <div
-                                className="absolute inset-0"
-                                style={{
-                                  background:
-                                    'linear-gradient(180deg, transparent 0%, rgba(0, 0, 0, 0.6) 100%)',
-                                }}
-                              />
-                            </div>
-
-                            <div className="absolute bottom-0 left-0 right-0 p-4">
-                              <p
-                                className="text-xs font-bold mb-2 line-clamp-2"
-                                style={{
-                                  fontFamily: "'Syne', sans-serif",
-                                  color: '#FFFFFF',
+                                className="absolute inset-0 cursor-pointer"
+                                style={{ backfaceVisibility: 'hidden' as const }}
+                                onClick={() => {
+                                  if (!isFlipped) toggleCardSelection(card.assetId);
                                 }}
                               >
-                                {card.name}
-                              </p>
-
-                              <div className="flex items-center justify-between">
-                                <div
-                                  className="w-2 h-2 rounded-full"
-                                  style={{
-                                    background: '#8B5CF6',
-                                  }}
-                                />
-                                <span
-                                  className="text-xs font-bold px-2 py-1 rounded"
-                                  style={{
-                                    fontFamily: "'IBM Plex Mono', monospace",
-                                    background: '#8B5CF6',
-                                    color: '#FFFFFF',
-                                  }}
-                                >
-                                  ⚡ {card.power}
-                                </span>
+                                <div className="relative w-full h-full overflow-hidden">
+                                  <img
+                                    src={card.imageUri}
+                                    alt={card.name}
+                                    className="w-full h-full object-cover"
+                                  />
+                                  <div
+                                    className="absolute inset-0"
+                                    style={{
+                                      background:
+                                        'linear-gradient(180deg, transparent 0%, rgba(0, 0, 0, 0.7) 100%)',
+                                    }}
+                                  />
+                                </div>
+                                <div className="absolute top-3 left-3 right-3 flex items-center justify-between">
+                                  <span className="text-[10px] px-2 py-1 rounded bg-black/60 text-white">
+                                    {profile?.tierLabel ? profile.tierLabel.toUpperCase() : 'NFT'}
+                                  </span>
+                                  <span className="text-[10px] px-2 py-1 rounded bg-[#8B5CF6] text-white">
+                                    PWR {card.power}
+                                  </span>
+                                </div>
+                                {profile && (
+                                  <div className="absolute bottom-14 left-3 right-3 text-[10px] space-y-1">
+                                    <div className="flex items-center justify-between rounded bg-black/45 px-2 py-1 text-white">
+                                      <span>Base</span>
+                                      <span>{profile.basePower.toFixed(2)}</span>
+                                    </div>
+                                    <div className="flex items-center justify-between rounded bg-black/45 px-2 py-1 text-white">
+                                      <span>Balance</span>
+                                      <span>{profile.balanceDelta >= 0 ? `+${profile.balanceDelta}` : profile.balanceDelta}</span>
+                                    </div>
+                                    <div className="flex items-center justify-between rounded bg-black/45 px-2 py-1 text-white">
+                                      <span>Loyalty</span>
+                                      <span>{profile.loyaltyUtility > 0 ? `+${profile.loyaltyUtility.toFixed(2)}` : '0.00'}</span>
+                                    </div>
+                                  </div>
+                                )}
+                                <div className="absolute bottom-0 left-0 right-0 p-3">
+                                  <p
+                                    className="text-xs font-bold mb-2 line-clamp-2"
+                                    style={{
+                                      fontFamily: "'Syne', sans-serif",
+                                      color: '#FFFFFF',
+                                    }}
+                                  >
+                                    {card.name}
+                                  </p>
+                                  <div className="flex items-center gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        toggleCardFlip(card.assetId);
+                                      }}
+                                      className="text-[10px] px-2 py-1 rounded bg-white/15 text-white"
+                                    >
+                                      FLIP
+                                    </button>
+                                  </div>
+                                </div>
                               </div>
-                            </div>
+
+                              <div
+                                className="absolute inset-0 p-3"
+                                style={{
+                                  transform: 'rotateY(180deg)',
+                                  backfaceVisibility: 'hidden',
+                                  background:
+                                    'linear-gradient(140deg, rgba(20, 16, 40, 0.96), rgba(8, 8, 14, 0.96))',
+                                }}
+                              >
+                                <p className="text-xs font-bold mb-2 text-white line-clamp-2">{card.name}</p>
+                                <p className="text-[10px] mb-2 text-[#A78BFA]">Power Distribution</p>
+                                <div className="space-y-1 text-[10px] text-white/90">
+                                  <div className="flex justify-between"><span>Base Tier</span><span>{profile?.basePower.toFixed(2) ?? card.power.toFixed(2)}</span></div>
+                                  <div className="flex justify-between"><span>Balance Delta</span><span>{profile ? (profile.balanceDelta >= 0 ? `+${profile.balanceDelta}` : profile.balanceDelta) : '0'}</span></div>
+                                  <div className="flex justify-between"><span>Loyalty Utility</span><span>{profile?.loyaltyUtility ? `+${profile.loyaltyUtility.toFixed(2)}` : '0.00'}</span></div>
+                                  <div className="h-px bg-white/20 my-1" />
+                                  <div className="flex justify-between text-[#F59E0B]"><span>Final Power</span><span>{profile?.finalPower.toFixed(2) ?? card.power.toFixed(2)}</span></div>
+                                </div>
+                                <p className="text-[10px] mt-3 text-white/70 line-clamp-3">
+                                  {profile?.notes?.join(" · ") ?? 'Deterministic fallback power used for this asset.'}
+                                </p>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    toggleCardFlip(card.assetId);
+                                  }}
+                                  className="absolute bottom-3 left-3 right-3 text-[10px] px-2 py-1 rounded bg-[#8B5CF6] text-white"
+                                >
+                                  BACK TO CARD
+                                </button>
+                              </div>
+                            </motion.div>
 
                             {isSelected && (
                               <motion.div
@@ -786,8 +867,8 @@ export default function VaultPage() {
                       cursor: !canEnter || loading ? 'not-allowed' : 'pointer',
                     }}
                   >
-                    {selectedCount < 2
-                      ? `SELECT ${2 - selectedCount} MORE CARDS`
+                    {(campaignMode ? selectedCount !== CAMPAIGN_DECK_SIZE : selectedCount < 2)
+                      ? `SELECT ${Math.max(0, (campaignMode ? CAMPAIGN_DECK_SIZE : 2) - selectedCount)} MORE CARDS`
                       : campaignMode
                         ? 'ENTER CAMPAIGN ARENA'
                         : 'ENTER THE ARENA'}
@@ -800,7 +881,7 @@ export default function VaultPage() {
                       color: 'rgba(255, 255, 255, 0.4)',
                     }}
                   >
-                    {selectedCount}/52 CARDS SELECTED
+                    {selectedCount}/{campaignMode ? CAMPAIGN_DECK_SIZE : 52} CARDS SELECTED
                   </p>
                 </motion.div>
               </>

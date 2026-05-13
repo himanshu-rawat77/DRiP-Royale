@@ -34,6 +34,8 @@ type MatchmakingMessage = {
 type ClientState = {
   ws: WebSocket;
   playerId: string;
+  wallet: string | null;
+  displayName: string;
   deckSize?: number;
   roomId?: string;
 };
@@ -177,7 +179,14 @@ export function createMatchmakingWsServer() {
       const da = room.decks[aId];
       const db = room.decks[bId];
       if (!da?.length || !db?.length) return;
-      room.match = initializeLocalMatch(da, db, aId, bId);
+      const aClient = clientsByPlayerId.get(aId);
+      const bClient = clientsByPlayerId.get(bId);
+      room.match = initializeLocalMatch(
+        da,
+        db,
+        aClient?.displayName?.trim() || aId,
+        bClient?.displayName?.trim() || bId
+      );
       console.log(`[matchmaking-ws] match started in room ${room.roomId}`);
       broadcastGameState(room);
     })();
@@ -411,11 +420,24 @@ export function createMatchmakingWsServer() {
   wss.on("connection", (ws, request: IncomingMessage) => {
     const url = new URL(request.url ?? "", "http://localhost");
     const playerId = url.searchParams.get("playerId") || nanoid(8);
+    const wallet = url.searchParams.get("wallet")?.trim() || null;
+    const fallbackName = `Player-${playerId.slice(0, 6)}`;
     console.log(`[matchmaking-ws] connected playerId=${playerId} url=${request.url ?? ""}`);
-
-    const state: ClientState = { ws, playerId };
+    const state: ClientState = { ws, playerId, wallet, displayName: fallbackName };
     clientsByWs.set(ws, state);
     clientsByPlayerId.set(playerId, state);
+
+    if (wallet) {
+      void dbQuery<{ username: string | null }>(`select username from users where wallet = $1`, [wallet])
+        .then((out) => {
+          const row = out.rows[0];
+          const resolved = row?.username?.trim();
+          if (resolved) state.displayName = resolved;
+        })
+        .catch((e) => {
+          console.warn("[matchmaking-ws] failed to resolve profile name", e);
+        });
+    }
 
     ws.on("message", (data) => {
       const client = clientsByWs.get(ws);

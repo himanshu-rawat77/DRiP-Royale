@@ -47,21 +47,25 @@ class MatchmakingService {
   private ws: WebSocket | null = null;
   private url: string;
   private playerId: string;
+  private wallet?: string;
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 5;
   private reconnectDelay = 3000;
   private messageHandlers: Map<string, Set<(msg: MatchmakingMessage) => void>> = new Map();
   private connectionHandlers: Array<(connected: boolean) => void> = [];
 
-  constructor(playerId: string, wsUrl?: string) {
+  constructor(playerId: string, wsUrl?: string, wallet?: string) {
     this.playerId = playerId;
+    this.wallet = wallet?.trim() || undefined;
     // Use current location for WebSocket URL if not provided
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     if (wsUrl) {
       this.url = wsUrl;
     } else {
       const base = `${protocol}//${window.location.host}/ws/matchmaking`;
-      this.url = `${base}?playerId=${encodeURIComponent(playerId)}`;
+      const params = new URLSearchParams({ playerId });
+      if (this.wallet) params.set('wallet', this.wallet);
+      this.url = `${base}?${params.toString()}`;
     }
   }
 
@@ -272,10 +276,14 @@ class MatchmakingService {
 
 // Create singleton instance
 let matchmakingService: MatchmakingService | null = null;
+let matchmakingServiceKey: string | null = null;
 
-export function getMatchmakingService(playerId: string, wsUrl?: string): MatchmakingService {
-  if (!matchmakingService) {
-    matchmakingService = new MatchmakingService(playerId, wsUrl);
+export function getMatchmakingService(playerId: string, wsUrl?: string, wallet?: string): MatchmakingService {
+  const key = `${playerId}|${wsUrl ?? ''}|${wallet ?? ''}`;
+  if (!matchmakingService || matchmakingServiceKey !== key) {
+    if (matchmakingService) matchmakingService.disconnect();
+    matchmakingService = new MatchmakingService(playerId, wsUrl, wallet);
+    matchmakingServiceKey = key;
   }
   return matchmakingService;
 }
@@ -284,5 +292,6 @@ export function resetMatchmakingService(): void {
   if (matchmakingService) {
     matchmakingService.disconnect();
     matchmakingService = null;
+    matchmakingServiceKey = null;
   }
 }

@@ -10,7 +10,14 @@ import { PlayerStats } from '@/lib/achievements';
 import { exportWalletBackup, importWalletBackup, useLedgerStorage, useProfileStorage } from '@/hooks/useLocalStorage';
 import { usePhantomWallet } from '@/contexts/PhantomWalletContext';
 import { fetchRoyaleWalletState, fetchTokenomicsConfig } from '@/lib/tokenomicsClient';
-import { fetchMatchHistory, fetchUserRecord, setUserRole, type MatchHistoryEntry, type UserRole } from '@/lib/usersClient';
+import {
+  fetchMatchHistory,
+  fetchUserRecord,
+  setUserRole,
+  updateUserProfile,
+  type MatchHistoryEntry,
+  type UserRole,
+} from '@/lib/usersClient';
 
 const PROFILE_BG = 'https://d2xsxph8kpxj0f.cloudfront.net/310519663486830791/WuCyWqVdFPbfCADWcJauKD/card-pattern-bg-By5zBsUSv6CrFLKpdTgQ8r.webp';
 
@@ -111,6 +118,10 @@ export default function ProfilePage() {
         setRole(user.role);
         setShowRoleModal(!user.role);
         setRemoteHistory(history.entries);
+        if (user.username?.trim()) {
+          setProfile((prev) => ({ ...prev, username: user.username!.trim() }));
+          setEditProfile((prev) => ({ ...prev, username: user.username!.trim() }));
+        }
       } catch {
         /* fallback to local storage */
       }
@@ -133,7 +144,7 @@ export default function ProfilePage() {
     setEditProfile(storedProfile);
   }, [storedProfile]);
 
-  const handleSaveProfile = () => {
+  const handleSaveProfile = async () => {
     const nextProfile = {
       ...editProfile,
       totalWins: ledgerStats.wins,
@@ -143,6 +154,13 @@ export default function ProfilePage() {
     setProfile(nextProfile);
     setStoredProfile(nextProfile);
     setIsEditing(false);
+    if (publicKey) {
+      try {
+        await updateUserProfile(publicKey, { username: nextProfile.username });
+      } catch {
+        toast.error('Profile saved locally, but failed to sync username to server');
+      }
+    }
   };
 
   const handleEditChange = (field: keyof UserProfile, value: string) => {
@@ -935,14 +953,8 @@ export default function ProfilePage() {
                                 </p>
                               </div>
                             </div>
-                            <span
-                              className="text-sm font-bold"
-                              style={{
-                                fontFamily: "'Syne', sans-serif",
-                                color: entry.result === 'WIN' ? '#10B981' : '#EF4444',
-                              }}
-                            >
-                              {entry.reward}
+                            <span className="text-xs" style={{ color: 'rgba(255, 255, 255, 0.55)' }}>
+                              {entry.result === 'WIN' ? `NFTs won: ${entry.nftsWon.length}` : 'No NFT won'}
                             </span>
                           </motion.div>
                         ))}
