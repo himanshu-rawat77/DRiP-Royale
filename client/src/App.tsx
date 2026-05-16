@@ -1,3 +1,4 @@
+import { Analytics } from "@vercel/analytics/react";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/NotFound";
@@ -50,6 +51,7 @@ function App() {
               <TooltipProvider>
                 <Toaster />
                 <Router />
+                <Analytics />
               </TooltipProvider>
             </DummyDeckProvider>
           </PhantomWalletProvider>
