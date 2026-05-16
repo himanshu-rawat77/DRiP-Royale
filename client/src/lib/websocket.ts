@@ -58,16 +58,18 @@ class MatchmakingService {
     this.playerId = playerId;
     this.wallet = wallet?.trim() || undefined;
     // Use current location for WebSocket URL if not provided
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    if (wsUrl) {
-      this.url = wsUrl;
-    } else {
-      const base = `${protocol}//${window.location.host}/ws/matchmaking`;
-      const params = new URLSearchParams({ playerId });
-      if (this.wallet) params.set('wallet', this.wallet);
-      this.url = `${base}?${params.toString()}`;
-    }
+    const envWs = (import.meta.env.VITE_WS_URL as string | undefined)?.trim();
+  if (wsUrl) {
+    this.url = wsUrl;
+  } else if (envWs) {
+    const sep = envWs.includes("?") ? "&" : "?";
+    this.url = `${envWs}${sep}playerId=${encodeURIComponent(playerId)}`;
+  } else {
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const base = `${protocol}//${window.location.host}/ws/matchmaking`;
+    this.url = `${base}?playerId=${encodeURIComponent(playerId)}`;
   }
+}
 
 //   const envWs = (import.meta.env.VITE_WS_URL as string | undefined)?.trim();
 
