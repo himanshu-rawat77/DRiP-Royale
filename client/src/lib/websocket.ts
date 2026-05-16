@@ -47,14 +47,16 @@ class MatchmakingService {
   private ws: WebSocket | null = null;
   private url: string;
   private playerId: string;
+  private wallet?: string;
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 5;
   private reconnectDelay = 3000;
   private messageHandlers: Map<string, Set<(msg: MatchmakingMessage) => void>> = new Map();
   private connectionHandlers: Array<(connected: boolean) => void> = [];
 
-  constructor(playerId: string, wsUrl?: string) {
+  constructor(playerId: string, wsUrl?: string, wallet?: string) {
     this.playerId = playerId;
+    this.wallet = wallet?.trim() || undefined;
     // Use current location for WebSocket URL if not provided
     const envWs = (import.meta.env.VITE_WS_URL as string | undefined)?.trim();
   if (wsUrl) {
@@ -276,10 +278,14 @@ class MatchmakingService {
 
 // Create singleton instance
 let matchmakingService: MatchmakingService | null = null;
+let matchmakingServiceKey: string | null = null;
 
-export function getMatchmakingService(playerId: string, wsUrl?: string): MatchmakingService {
-  if (!matchmakingService) {
-    matchmakingService = new MatchmakingService(playerId, wsUrl);
+export function getMatchmakingService(playerId: string, wsUrl?: string, wallet?: string): MatchmakingService {
+  const key = `${playerId}|${wsUrl ?? ''}|${wallet ?? ''}`;
+  if (!matchmakingService || matchmakingServiceKey !== key) {
+    if (matchmakingService) matchmakingService.disconnect();
+    matchmakingService = new MatchmakingService(playerId, wsUrl, wallet);
+    matchmakingServiceKey = key;
   }
   return matchmakingService;
 }
@@ -288,5 +294,6 @@ export function resetMatchmakingService(): void {
   if (matchmakingService) {
     matchmakingService.disconnect();
     matchmakingService = null;
+    matchmakingServiceKey = null;
   }
 }

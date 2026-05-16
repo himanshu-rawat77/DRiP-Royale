@@ -1,5 +1,5 @@
 import { motion } from "framer-motion";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { useLocation } from "wouter";
 import { toast } from "sonner";
 import TopBar from "@/components/TopBar";
@@ -21,24 +21,10 @@ import {
 import { sendCampaignIntentTransaction } from "@/lib/onchainCampaignTx";
 import { purchaseChallengeTickets } from "@/lib/tokenomicsClient";
 import { writeCampaignSession } from "@/lib/campaignSession";
-import type { GameCard } from "@/lib/types";
 
 const BG =
   "https://d2xsxph8kpxj0f.cloudfront.net/310519663486830791/WuCyWqVdFPbfCADWcJauKD/arena-split-bg-By5zBsUSv6CrFLKpdTgQ8r.webp";
-
-function buildDummyDeck(size: number = 5): GameCard[] {
-  const out: GameCard[] = [];
-  for (let i = 0; i < size; i++) {
-    out.push({
-      assetId: `dummy-${i + 1}`,
-      name: `Training Card ${i + 1}`,
-      imageUri:
-        "https://d2xsxph8kpxj0f.cloudfront.net/310519663486830791/WuCyWqVdFPbfCADWcJauKD/card-pattern-bg-By5zBsUSv6CrFLKpdTgQ8r.webp",
-      power: 4 + (i % 4),
-    });
-  }
-  return out;
-}
+const CAMPAIGN_DECK_SIZE = 5;
 
 export default function SoloCampaignPage() {
   const [, navigate] = useLocation();
@@ -109,21 +95,10 @@ export default function SoloCampaignPage() {
     })();
   }, [publicKey, campaigns]);
 
-  const getDeckForCampaign = useMemo(() => {
-    const base = assets.slice(0, 8);
-    return (campaignId: string): GameCard[] => {
-      if (campaignId === "mvp-training" && base.length < 3) {
-        return buildDummyDeck(5);
-      }
-      return base;
-    };
-  }, [assets]);
-
   const runBattle = async (campaign: CampaignSummary) => {
     if (!publicKey) return;
-    const deck = getDeckForCampaign(campaign.id);
-    if (deck.length < campaign.minDeckSize) {
-      toast.error(`Select at least ${campaign.minDeckSize} DRiP cards in your deck.`);
+    if (assets.length < CAMPAIGN_DECK_SIZE) {
+      toast.error(`You need at least ${CAMPAIGN_DECK_SIZE} NFTs in your wallet for campaign mode.`);
       return;
     }
 

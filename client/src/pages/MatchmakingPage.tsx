@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useLocation } from 'wouter';
 import { toast } from 'sonner';
 import TopBar from '@/components/TopBar';
@@ -7,22 +7,24 @@ import Footer from '@/components/Footer';
 import { useDeck } from '@/contexts/DeckContext';
 import { useMatchmaking } from '@/hooks/useMatchmaking';
 import { fetchEscrowConfig } from '@/lib/escrowClient';
+import { usePhantomWallet } from '@/contexts/PhantomWalletContext';
 
 const MATCHMAKING_BG = 'https://d2xsxph8kpxj0f.cloudfront.net/310519663486830791/WuCyWqVdFPbfCADWcJauKD/arena-split-bg-By5zBsUSv6CrFLKpdTgQ8r.webp';
 
 export default function MatchmakingPage() {
   const [, navigate] = useLocation();
   const { selectedDeck } = useDeck();
-  const [playerId] = useState(() => `player-${Math.random().toString(36).substr(2, 9)}`);
-  const matchmaking = useMatchmaking(playerId);
+  const { publicKey } = usePhantomWallet();
+  const playerId = useMemo(() => `wallet-${(publicKey ?? '').trim()}`, [publicKey]);
+  const matchmaking = useMatchmaking(playerId, publicKey);
   const [queueStatus, setQueueStatus] = useState<'idle' | 'joining' | 'waiting' | 'found'>('idle');
 
   // Redirect if no deck selected
   useEffect(() => {
-    if (!selectedDeck || selectedDeck.length === 0) {
+    if (!publicKey || !selectedDeck || selectedDeck.length === 0) {
       navigate('/vault');
     }
-  }, [selectedDeck, navigate]);
+  }, [publicKey, selectedDeck, navigate]);
 
   // Handle match found
   useEffect(() => {

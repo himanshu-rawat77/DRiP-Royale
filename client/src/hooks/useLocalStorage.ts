@@ -61,7 +61,13 @@ type StoredLedgerEntry = {
   result: 'WIN' | 'LOSS';
   date: string;
   reward: string;
-  nftsWon: string[];
+  nftsWon: Array<{
+    assetId: string;
+    name?: string;
+    imageUri?: string;
+    power?: number;
+    metadataUri?: string;
+  }>;
 };
 
 type ProfileStoreV2 = {
@@ -226,7 +232,13 @@ export function useLedgerStorage(walletAddress?: string | null) {
     result: 'WIN' | 'LOSS';
     date: string;
     reward: string;
-    nftsWon: string[];
+    nftsWon: Array<{
+      assetId: string;
+      name?: string;
+      imageUri?: string;
+      power?: number;
+      metadataUri?: string;
+    }>;
   }> = [];
   const key = walletKey(walletAddress);
   const [ledger, setLedger] = useState<StoredLedgerEntry[]>(() => {

@@ -96,7 +96,7 @@ export default function ArenaPage() {
     const opponent = didWin ? winnerInfo.loser.name : winnerInfo.winner.name;
     const captured = didWin ? getNftsCapturedFromOpponent(nextMatch) : [];
     const result: 'WIN' | 'LOSS' = didWin ? 'WIN' : 'LOSS';
-    const reward = didWin ? `+${captured.length * 10} SOL` : '-';
+    const reward = didWin ? `${captured.length} NFT${captured.length === 1 ? '' : 's'} won` : '-';
 
     const newEntry = {
       id: `match-${Date.now()}`,
@@ -104,7 +104,12 @@ export default function ArenaPage() {
       result,
       date: new Date().toLocaleString(),
       reward,
-      nftsWon: captured.map((card) => card.assetId || card.name || ''),
+      nftsWon: captured.map((card) => ({
+        assetId: card.assetId,
+        name: card.name,
+        imageUri: card.imageUri,
+        power: card.power,
+      })),
     };
     setLedger([newEntry, ...ledgerRef.current]);
     void recordMatchHistory({
@@ -260,7 +265,7 @@ export default function ArenaPage() {
     if (campaignSession) return;
     if (!mpSession || !selectedDeck?.length) return;
 
-    const service = getMatchmakingService(mpSession.playerId);
+    const service = getMatchmakingService(mpSession.playerId, undefined, publicKey ?? undefined);
     const deckPayload = selectedDeck.map((c) => ({
       assetId: c.assetId,
       imageUri: c.imageUri,
@@ -410,7 +415,7 @@ export default function ArenaPage() {
     }
     if (mpSession) {
       if (!youAre || player !== youAre || match.pickTurn !== youAre || match.picksThisRound[youAre]) return;
-      const service = getMatchmakingService(mpSession.playerId);
+      const service = getMatchmakingService(mpSession.playerId, undefined, publicKey ?? undefined);
       if (service.isConnected()) {
         service.sendPlayerAction(mpSession.roomId, { action: 'pick', assetId });
       }

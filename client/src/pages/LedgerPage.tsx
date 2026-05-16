@@ -11,8 +11,30 @@ export default function LedgerPage() {
   const [ledger] = useLedgerStorage(publicKey);
   const [remoteHistory, setRemoteHistory] = useState<MatchHistoryEntry[]>([]);
   const data = remoteHistory.length > 0 ? remoteHistory : ledger;
-  const wonCount = useMemo(() => data.filter((e) => e.result === 'WIN').length, [data]);
-  const lostCount = useMemo(() => data.filter((e) => e.result === 'LOSS').length, [data]);
+  const normalizedData = useMemo(
+    () =>
+      data.map((entry) => ({
+        ...entry,
+        nftsWon: (entry.nftsWon ?? [])
+          .map((nft) => {
+            if (typeof nft === 'string') return { assetId: nft };
+            if (nft && typeof nft === 'object' && typeof (nft as { assetId?: unknown }).assetId === 'string') {
+              return nft as {
+                assetId: string;
+                name?: string;
+                imageUri?: string;
+                power?: number;
+                metadataUri?: string;
+              };
+            }
+            return null;
+          })
+          .filter((nft): nft is { assetId: string; name?: string; imageUri?: string; power?: number; metadataUri?: string } => !!nft),
+      })),
+    [data]
+  );
+  const wonCount = useMemo(() => normalizedData.filter((e) => e.result === 'WIN').length, [normalizedData]);
+  const lostCount = useMemo(() => normalizedData.filter((e) => e.result === 'LOSS').length, [normalizedData]);
 
   useEffect(() => {
     if (!publicKey) {
@@ -87,7 +109,7 @@ export default function LedgerPage() {
               className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-12"
             >
               {[
-                { label: 'TOTAL MATCHES', value: data.length, icon: '⚔️', color: '#A78BFA' },
+                { label: 'TOTAL MATCHES', value: normalizedData.length, icon: '⚔️', color: '#A78BFA' },
                 { label: 'WON', value: wonCount, icon: '✓', color: '#8B5CF6' },
                 { label: 'LOST', value: lostCount, icon: '✗', color: '#F59E0B' },
               ].map((stat, index) => (
@@ -128,7 +150,7 @@ export default function LedgerPage() {
               transition={{ duration: 0.6, delay: 0.2 }}
               className="space-y-4"
             >
-              {data.map((entry, index) => (
+              {normalizedData.map((entry, index) => (
                 <motion.div
                   key={entry.id}
                   initial={{ opacity: 0, x: -20 }}
@@ -189,23 +211,51 @@ export default function LedgerPage() {
                           </p>
                         </div>
                       </div>
-                      <p className="text-sm font-bold" style={{ color: '#10B981' }}>
-                        {entry.reward}
+                      <p className="text-xs" style={{ color: 'rgba(255, 255, 255, 0.55)' }}>
+                        {entry.result === 'WIN' ? `NFTs won: ${entry.nftsWon.length}` : 'No NFT won'}
                       </p>
                     </div>
                   </div>
 
                   {entry.nftsWon.length > 0 && (
-                    <p className="text-xs mt-4" style={{ color: 'rgba(255, 255, 255, 0.45)' }}>
-                      NFTs won: {entry.nftsWon.length}
-                    </p>
+                    <div className="mt-4 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+                      {entry.nftsWon.map((nft, nftIndex) => (
+                        <div
+                          key={`${entry.id}-${nft.assetId}-${nftIndex}`}
+                          className="rounded-lg overflow-hidden"
+                          style={{
+                            border: '1px solid rgba(16, 185, 129, 0.35)',
+                            background: 'rgba(16, 185, 129, 0.05)',
+                          }}
+                        >
+                          {nft.imageUri && (
+                            <div className="aspect-[2/3] w-full overflow-hidden">
+                              <img src={nft.imageUri} alt={nft.name ?? nft.assetId} className="w-full h-full object-cover" />
+                            </div>
+                          )}
+                          <div className="p-2">
+                            <p className="text-xs font-bold line-clamp-1" style={{ color: '#FFFFFF' }}>
+                              {nft.name ?? 'Won NFT'}
+                            </p>
+                            <p className="text-[10px] mt-1" style={{ color: 'rgba(255, 255, 255, 0.6)' }}>
+                              {nft.assetId}
+                            </p>
+                            {typeof nft.power === 'number' && (
+                              <p className="text-[10px] mt-1" style={{ color: '#10B981' }}>
+                                Power: {nft.power}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
                   )}
                 </motion.div>
               ))}
             </motion.div>
 
             {/* Empty State Message */}
-            {data.length === 0 && (
+            {normalizedData.length === 0 && (
               <motion.div
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}

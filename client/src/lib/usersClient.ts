@@ -13,10 +13,18 @@ export interface MatchHistoryEntry {
   opponent: string;
   result: "WIN" | "LOSS";
   reward: string;
-  nftsWon: string[];
+  nftsWon: WonNft[];
   mode: string;
   date: string;
   createdAt: string;
+}
+
+export interface WonNft {
+  assetId: string;
+  name?: string;
+  imageUri?: string;
+  power?: number;
+  metadataUri?: string;
 }
 
 export interface MatchHistoryResponse {
@@ -88,6 +96,17 @@ export async function setUserRole(wallet: string, role: UserRole, username?: str
   return data as UserRecord;
 }
 
+export async function updateUserProfile(wallet: string, input: { username?: string }): Promise<UserRecord> {
+  const res = await fetch(`/api/users/${encodeURIComponent(wallet)}/profile`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  const data = (await res.json()) as UserRecord | { error?: string };
+  if (!res.ok) throw new Error("error" in data && data.error ? data.error : "Failed to update profile");
+  return data as UserRecord;
+}
+
 export async function fetchMatchHistory(wallet: string): Promise<MatchHistoryResponse> {
   const res = await fetch(`/api/users/${encodeURIComponent(wallet)}/history`);
   if (!res.ok) throw new Error("Failed to load history");
@@ -100,7 +119,7 @@ export async function recordMatchHistory(input: {
   opponent: string;
   result: "WIN" | "LOSS";
   reward: string;
-  nftsWon?: string[];
+  nftsWon?: WonNft[];
   mode?: string;
 }): Promise<void> {
   const res = await fetch("/api/users/matches", {

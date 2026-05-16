@@ -18,6 +18,18 @@ const TIER_BASE_POWER: Record<string, number> = {
 };
 
 type MetadataAttribute = { trait_type?: string; value?: unknown };
+export interface PowerProfile {
+  tierLabel: string;
+  basePower: number;
+  balanceDelta: number;
+  loyaltyUtility: number;
+  finalPower: number;
+  notes: string[];
+}
+
+export type DripGameCard = GameCard & {
+  powerProfile?: PowerProfile;
+};
 
 function normalizeLabel(value: unknown): string {
   return typeof value === "string" ? value.trim().toLowerCase() : "";
@@ -105,11 +117,33 @@ function deriveLoyaltyUtility(asset: DASAsset): number {
   return Math.min(0.25, Math.floor(heldDays / 365) * 0.05);
 }
 
-function deriveRealMatchPower(asset: DASAsset): number {
+function buildPowerProfile(asset: DASAsset): PowerProfile {
+  const metadata = getInlineMetadata(asset);
+  const tierRaw =
+    getAttributeValue(asset, "tier", "rarity") ??
+    metadata?.tier ??
+    metadata?.rarity;
+  const tierLabel = normalizeLabel(tierRaw) || "untyped";
   const basePower = deriveTierBasePower(asset);
   const balanceDelta = deriveDynamicBalanceDelta(asset);
   const loyaltyUtility = deriveLoyaltyUtility(asset);
-  return Math.max(POWER_MIN, Math.min(POWER_MAX, basePower + balanceDelta + loyaltyUtility));
+  const finalPower = Math.max(
+    POWER_MIN,
+    Math.min(POWER_MAX, basePower + balanceDelta + loyaltyUtility)
+  );
+  const notes: string[] = [];
+  if (balanceDelta < 0) notes.push("High win-rate balancing nerf applied");
+  if (balanceDelta > 0) notes.push("Low usage balancing boost applied");
+  if (loyaltyUtility > 0) notes.push("Long-hold loyalty utility bonus applied");
+  if (notes.length === 0) notes.push("No dynamic modifiers applied");
+  return {
+    tierLabel,
+    basePower,
+    balanceDelta,
+    loyaltyUtility,
+    finalPower,
+    notes,
+  };
 }
 
 function getHeliusRpcUrl(): string {
@@ -246,12 +280,12 @@ export function assetToGameCard(asset: DASAsset, power?: number): GameCard {
 export async function fetchDripAssetsForDeck(
   ownerAddress: string,
   maxCards: number = DEFAULT_DECK_LIMIT
-): Promise<GameCard[]> {
+): Promise<DripGameCard[]> {
   const dripCreator =
     (import.meta.env.VITE_DRIP_CREATOR_ADDRESS as string | undefined) ||
     (import.meta.env.NEXT_PUBLIC_DRIP_CREATOR_ADDRESS as string | undefined);
   const cap = Math.min(Math.max(1, maxCards), DEFAULT_DECK_LIMIT);
-  const all: GameCard[] = [];
+  const all: DripGameCard[] = [];
   let page = 1;
   const limit = 1000;
 
@@ -262,8 +296,11 @@ export async function fetchDripAssetsForDeck(
       
       for (const asset of dripOnly) {
         if (all.length >= cap) break;
-        const power = deriveRealMatchPower(asset);
-        all.push(assetToGameCard(asset, power));
+        const profile = buildPowerProfile(asset);
+        all.push({
+          ...assetToGameCard(asset, profile.finalPower),
+          powerProfile: profile,
+        });
       }
       
       if (items.length < limit) break;

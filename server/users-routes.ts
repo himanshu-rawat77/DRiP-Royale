@@ -9,6 +9,43 @@ function normalizeWallet(wallet?: string): string {
   return (wallet ?? "").trim();
 }
 
+type WonNft = {
+  assetId: string;
+  name?: string;
+  imageUri?: string;
+  power?: number;
+  metadataUri?: string;
+};
+
+function normalizeWonNfts(input: unknown): WonNft[] {
+  if (!Array.isArray(input)) return [];
+  const out: WonNft[] = [];
+  for (const item of input) {
+    if (typeof item === "string") {
+      const assetId = item.trim();
+      if (assetId) out.push({ assetId });
+      continue;
+    }
+    if (!item || typeof item !== "object") continue;
+    const assetIdRaw = (item as { assetId?: unknown }).assetId;
+    const assetId = typeof assetIdRaw === "string" ? assetIdRaw.trim() : "";
+    if (!assetId) continue;
+    const nameRaw = (item as { name?: unknown }).name;
+    const imageUriRaw = (item as { imageUri?: unknown }).imageUri;
+    const powerRaw = (item as { power?: unknown }).power;
+    const metadataUriRaw = (item as { metadataUri?: unknown }).metadataUri;
+    out.push({
+      assetId,
+      name: typeof nameRaw === "string" && nameRaw.trim() ? nameRaw.trim() : undefined,
+      imageUri: typeof imageUriRaw === "string" && imageUriRaw.trim() ? imageUriRaw.trim() : undefined,
+      power: typeof powerRaw === "number" && Number.isFinite(powerRaw) ? powerRaw : undefined,
+      metadataUri:
+        typeof metadataUriRaw === "string" && metadataUriRaw.trim() ? metadataUriRaw.trim() : undefined,
+    });
+  }
+  return out;
+}
+
 function readQueryLimit(req: any, fallback: number): number {
   const expressLimit = req?.query?.limit;
   if (expressLimit !== undefined) {
@@ -84,6 +121,26 @@ export function createUsersRouter(): Router {
     return sendJson(res, 200, { ok: true, ...out.rows[0] });
   });
 
+  r.patch("/:wallet/profile", async (req, res) => {
+    const wallet = normalizeWallet(req.params.wallet);
+    const body = req.body as { username?: string };
+    if (!wallet) return sendJson(res, 400, { error: "wallet is required" });
+    const usernameRaw = typeof body.username === "string" ? body.username.trim() : "";
+    const username = usernameRaw ? usernameRaw.slice(0, 40) : null;
+    const out = await dbQuery<{ wallet: string; role: UserRole | null; username: string | null }>(
+      `
+      insert into users (wallet, username, created_at, updated_at)
+      values ($1, $2, now(), now())
+      on conflict (wallet)
+      do update set username = excluded.username,
+                    updated_at = now()
+      returning wallet, role, username
+      `,
+      [wallet, username]
+    );
+    return sendJson(res, 200, { ok: true, ...out.rows[0] });
+  });
+
   r.get("/:wallet/history", async (req, res) => {
     const wallet = normalizeWallet(req.params.wallet);
     const limitRaw = readQueryLimit(req, 50);
@@ -96,7 +153,7 @@ export function createUsersRouter(): Router {
       opponent: string;
       result: "WIN" | "LOSS";
       reward: string;
-      nfts_won: string[];
+      nfts_won: unknown;
       mode: string;
       created_at: string;
     }>(
@@ -116,7 +173,7 @@ export function createUsersRouter(): Router {
       opponent: row.opponent,
       result: row.result,
       reward: row.reward,
-      nftsWon: row.nfts_won ?? [],
+      nftsWon: normalizeWonNfts(row.nfts_won),
       mode: row.mode,
       date: new Date(row.created_at).toLocaleString(),
       createdAt: row.created_at,
@@ -137,7 +194,7 @@ export function createUsersRouter(): Router {
       opponent?: string;
       result?: "WIN" | "LOSS";
       reward?: string;
-      nftsWon?: string[];
+      nftsWon?: unknown[];
       mode?: string;
     };
     const wallet = normalizeWallet(body.wallet);
@@ -147,7 +204,7 @@ export function createUsersRouter(): Router {
     }
     const opponent = (body.opponent ?? "Opponent").trim();
     const reward = (body.reward ?? "N/A").trim();
-    const nftsWon = Array.isArray(body.nftsWon) ? body.nftsWon : [];
+    const nftsWon = normalizeWonNfts(body.nftsWon);
     const mode = (body.mode ?? "multiplayer").trim();
 
     await dbQuery(

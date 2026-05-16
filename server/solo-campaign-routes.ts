@@ -123,6 +123,7 @@ async function listAllCampaigns(): Promise<Campaign[]> {
 }
 
 const STAGES = ["Match 1", "Match 2", "Match 3", "Boss"] as const;
+const CAMPAIGN_DECK_SIZE = 5;
 const ENTRY_SPLIT = { creator: 50, rewardPool: 35, protocol: 15 } as const;
 
 function difficultyScale(difficulty: Difficulty): number {
@@ -147,18 +148,18 @@ function randomInt(min: number, max: number): number {
 }
 function difficultyPowerBand(difficulty: Difficulty, stageIndex: number): { min: number; max: number; boostChance: number } {
   if (difficulty === "nightmare") {
-    if (stageIndex >= 3) return { min: 10, max: 10, boostChance: 1 };
-    if (stageIndex >= 2) return { min: 9, max: 10, boostChance: 0.95 };
-    return { min: 9, max: 10, boostChance: 0.85 };
+    if (stageIndex >= 3) return { min: 8, max: 10, boostChance: 0.82 };
+    if (stageIndex >= 2) return { min: 8, max: 10, boostChance: 0.72 };
+    return { min: 7, max: 10, boostChance: 0.58 };
   }
   if (difficulty === "hard") {
-    if (stageIndex >= 3) return { min: 8, max: 10, boostChance: 0.8 };
-    if (stageIndex >= 2) return { min: 7, max: 10, boostChance: 0.68 };
-    return { min: 6, max: 9, boostChance: 0.5 };
+    if (stageIndex >= 3) return { min: 7, max: 10, boostChance: 0.68 };
+    if (stageIndex >= 2) return { min: 6, max: 10, boostChance: 0.56 };
+    return { min: 5, max: 9, boostChance: 0.42 };
   }
-  if (stageIndex >= 3) return { min: 7, max: 10, boostChance: 0.52 };
-  if (stageIndex >= 2) return { min: 6, max: 9, boostChance: 0.38 };
-  return { min: 5, max: 8, boostChance: 0.24 };
+  if (stageIndex >= 3) return { min: 6, max: 10, boostChance: 0.5 };
+  if (stageIndex >= 2) return { min: 5, max: 9, boostChance: 0.36 };
+  return { min: 4, max: 8, boostChance: 0.24 };
 }
 function opponentDeckFromPlayer(deck: GameCard[], difficulty: Difficulty, stageIndex: number): GameCard[] {
   const scale = stageScale(stageIndex, difficulty);
@@ -169,8 +170,28 @@ function opponentDeckFromPlayer(deck: GameCard[], difficulty: Difficulty, stageI
     const scaled = Math.round(source.power * scale) + (stageIndex >= 2 ? 1 : 0);
     const randomBandPower = randomInt(band.min, band.max);
     const boosted = Math.random() < band.boostChance ? Math.max(scaled, randomBandPower) : Math.round((scaled + randomBandPower) / 2);
-    const floorByDifficulty = difficulty === "nightmare" ? (stageIndex >= 2 ? 9 : 8) : difficulty === "hard" ? 6 : 4;
-    const power = Math.max(2, Math.min(10, Math.max(floorByDifficulty, boosted)));
+    const floorByDifficulty =
+      difficulty === "nightmare"
+        ? stageIndex >= 3
+          ? 8
+          : stageIndex >= 2
+            ? 7
+            : 6
+        : difficulty === "hard"
+          ? stageIndex >= 3
+            ? 6
+            : stageIndex >= 2
+              ? 5
+              : 4
+          : stageIndex >= 3
+            ? 5
+            : stageIndex >= 2
+              ? 4
+              : 3;
+    // Keep boss fights threatening without flattening every card to 10.
+    const bossSpike = stageIndex >= 3 && Math.random() < (difficulty === "nightmare" ? 0.35 : 0.22) ? 1 : 0;
+    const jitter = randomInt(-1, 1);
+    const power = Math.max(2, Math.min(10, Math.max(floorByDifficulty, boosted + jitter + bossSpike)));
     return {
       assetId: `stage-${stageIndex}-${idx}-${source.assetId}`,
       imageUri: source.imageUri,
@@ -649,7 +670,9 @@ export function createSoloCampaignRouter(): Router {
     const wallet = body.walletAddress?.trim();
     if (!wallet) return sendJson(res, 400, { error: "walletAddress is required" });
     const deck = Array.isArray(body.deck) ? body.deck : [];
-    if (deck.length < campaign.minDeckSize) return sendJson(res, 400, { error: `Minimum deck size is ${campaign.minDeckSize}` });
+    if (deck.length !== CAMPAIGN_DECK_SIZE) {
+      return sendJson(res, 400, { error: `Campaign deck must contain exactly ${CAMPAIGN_DECK_SIZE} cards` });
+    }
     const difficulty: Difficulty = body.difficulty === "hard" || body.difficulty === "nightmare" ? body.difficulty : "normal";
 
     const entryCost = Math.max(0, Math.floor(campaign.entryTicketCost));
